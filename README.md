@@ -153,6 +153,12 @@ agentsshcli list
 
 ## 卸载和清理
 
+更新到最新版：
+
+```bash
+npm install -g agent-ssh-cli@latest
+```
+
 ```bash
 npm uninstall -g agent-ssh-cli
 npm cache clean --force

@@ -152,6 +152,12 @@ Installation is complete.
 
 ## Uninstall and Cleanup
 
+Update to the latest version:
+
+```bash
+npm install -g agent-ssh-cli@latest
+```
+
 ```bash
 npm uninstall -g agent-ssh-cli
 npm cache clean --force
