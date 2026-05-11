@@ -41,7 +41,7 @@ const cargoArgs = ["build", "--release", "--manifest-path", "native/Cargo.toml"]
 if (targetTriple) {
   cargoArgs.push("--target", targetTriple);
 }
-run("cargo", cargoArgs);
+run(process.platform === "win32" ? "cargo.cmd" : "cargo", cargoArgs);
 
 const source = targetTriple
   ? path.join(projectRoot, "native", "target", targetTriple, "release", executableName)
