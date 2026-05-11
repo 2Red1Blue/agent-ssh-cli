@@ -27,7 +27,8 @@ const targetDir = path.join(projectRoot, "native-bin", `${platform}-${arch}`);
 function run(command, args) {
   const result = spawnSync(command, args, {
     cwd: projectRoot,
-    stdio: "inherit"
+    stdio: "inherit",
+    shell: process.platform === "win32"
   });
   if (result.error) {
     throw result.error;
@@ -41,7 +42,7 @@ const cargoArgs = ["build", "--release", "--manifest-path", "native/Cargo.toml"]
 if (targetTriple) {
   cargoArgs.push("--target", targetTriple);
 }
-run(process.platform === "win32" ? "cargo.cmd" : "cargo", cargoArgs);
+run("cargo", cargoArgs);
 
 const source = targetTriple
   ? path.join(projectRoot, "native", "target", targetTriple, "release", executableName)
