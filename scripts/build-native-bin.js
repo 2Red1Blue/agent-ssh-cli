@@ -2,8 +2,9 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const targetTriple = process.env.TARGET || process.env.npm_config_target;
 const tripleMap = {
   "aarch64-apple-darwin": ["darwin", "arm64"],
