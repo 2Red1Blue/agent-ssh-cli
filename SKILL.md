@@ -5,7 +5,7 @@ description: 使用基于 SSH 的 CLI 安全操作已配置的远端服务器。
 
 # agent-ssh-cli 使用说明
 
-`agentsshcli` 是一个基于 SSH 的命令行工具，用于让 AI 或用户通过本地配置安全地操作远端服务器。
+`agentsshcli` 是一个通过 npm 安装、由 Rust 原生执行器完成 SSH 操作的命令行工具，用于让 AI 或用户通过本地配置安全地操作远端服务器。
 
 它能做的事：
 
@@ -15,7 +15,7 @@ description: 使用基于 SSH 的 CLI 安全操作已配置的远端服务器。
 - 从远端服务器下载文件到本地
 - 通过命令黑白名单限制可执行命令
 - 通过本地路径白名单限制上传和下载访问范围
-- 短时间缓存 SSH 连接，减少连续操作时的重复连接开销
+- 通过 Rust daemon 短时间缓存 SSH 连接，减少连续操作时的重复连接开销
 
 它不做的事：
 
@@ -100,16 +100,23 @@ npm install -g agent-ssh-cli
 agentsshcli --help
 ```
 
+从源码开发或本地调试时，需要先构建 Rust 原生执行器：
+
+```bash
+npm run build:native
+npm test
+```
+
 ## 全局参数
 
 - `--config <path>`: 指定配置文件路径，优先级高于默认配置
 - `--help`, `-h`: 输出帮助
 - `--version`, `-v`: 输出版本
 
-`exec`、`upload`、`download` 支持连接缓存参数：
+`exec`、`upload`、`download` 默认使用 Rust daemon 连接缓存，并支持以下缓存参数：
 
-- `--no-cache`: 跳过 SSH 连接缓存，本次命令独立建立并关闭连接
-- `--cache-ttl <ms>`: 设置连接缓存空闲毫秒数，默认 `180000`
+- `--no-cache`: 跳过 Rust daemon 连接缓存，本次命令独立建立并关闭连接
+- `--cache-ttl <ms>`: 设置 Rust daemon 连接缓存空闲毫秒数，默认 `180000`
 
 ## list
 

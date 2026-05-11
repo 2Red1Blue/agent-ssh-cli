@@ -1,6 +1,6 @@
 # AI 安装说明
 
-使用本工具时，先按下面步骤安装 CLI 和 skill。
+使用本工具时，先按下面步骤安装 CLI 和 skill。CLI 仍通过 npm 安装，内部 SSH 执行逻辑由 Rust 原生执行器完成。
 
 ## 1. 安装 CLI
 
@@ -16,7 +16,12 @@ node --version
 npm --version
 ```
 
-需要 Node.js `>= 18` 和 npm `>= 8`。
+需要 Node.js `>= 18` 和 npm `>= 8`。正式 npm 包会携带或使用已构建的原生执行器；从源码本地调试时需要额外执行：
+
+```bash
+npm run build:native
+npm test
+```
 
 ## 2. 初始化配置目录
 
@@ -58,4 +63,4 @@ test -f ~/.agent-ssh-cli/config.json
 agentsshcli list
 ```
 
-拿到连接名后，再执行 `exec`、`upload` 或 `download`。
+拿到连接名后，再执行 `exec`、`upload` 或 `download`。这三个命令默认使用 Rust daemon 连接缓存；如需单次直连，可添加 `--no-cache`。

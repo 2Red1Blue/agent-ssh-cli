@@ -12,7 +12,7 @@ Remote exec · File upload · File download · Connection config · Command whit
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node.js >=18"></a>
   <a href="https://www.npmjs.com/"><img src="https://img.shields.io/badge/npm-%3E%3D8-CB3837?logo=npm&logoColor=white" alt="npm >=8"></a>
   <a href="https://github.com/sleepinginsummer/agent-ssh-cli"><img src="https://img.shields.io/badge/Windows-MacOS-0078D6?labelColor=0078D6&color=C0C0C0" alt="Windows/MacOS"></a>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.3-blue" alt="release v0.1.3"></a>
+  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.2.0-blue" alt="release v0.2.0"></a>
   <a href="https://github.com/sleepinginsummer/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
@@ -53,7 +53,8 @@ Please read https://github.com/sleepinginsummer/agent-ssh-cli/blob/main/AI_INSTA
 - Local network access to the target SSH server
 - SSH service enabled on the target server
 - If private key authentication is used, the private key file must be readable by the current user
-- The connection cache for `agentsshcli exec/upload/download` supports macOS/Linux/Windows
+- The runtime has been migrated to Rust while npm remains the installation entry
+- `agentsshcli exec/upload/download` use the Rust daemon connection cache by default, and can still run directly with `--no-cache`
 
 ### Installation Steps
 
@@ -67,6 +68,44 @@ agentsshcli --help
 2. Import SKILL.md:
 
 Open [SKILL.md](SKILL.md) and add it to the agent.
+
+### Local development build
+
+The package keeps the npm command entry, while the actual runtime uses a Rust native binary. When installing from source, build the native binary first:
+
+```bash
+npm run build:native
+npm run build:native-bin
+npm run build:native-package
+npm test
+```
+
+Execution path:
+
+```text
+agentsshcli command
+  -> bin/agentsshcli.js
+  -> native/target/release/agentsshcli-native
+```
+
+Implemented in Rust:
+
+- `agentsshcli list`
+- `agentsshcli init-config`
+- `agentsshcli exec ...` / `agentsshcli exec --no-cache ...`
+- `agentsshcli upload ...` / `agentsshcli upload --no-cache ...`
+- `agentsshcli download ...` / `agentsshcli download --no-cache ...`
+- Rust daemon connection cache and `--cache-ttl`
+
+Before publishing the npm package, generate the prebuilt binary and platform package for the target platform, then inspect the package contents:
+
+```bash
+npm run build:native-package
+npm pack --dry-run
+(cd npm/darwin-arm64 && npm pack --dry-run)
+```
+
+The publish layout is the main `agent-ssh-cli` package plus optional platform packages such as `@agent-ssh-cli/darwin-arm64`. Prebuilt binaries use this layout: `native-bin/<platform>-<arch>/agentsshcli-native`; Windows uses `agentsshcli-native.exe`.
 
 ## Configuration
 
@@ -146,6 +185,7 @@ Test command
 
 ```bash
 agentsshcli list
+agentsshcli exec --no-cache password-server "pwd"
 ```
 
 Installation is complete.

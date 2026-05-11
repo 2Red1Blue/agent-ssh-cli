@@ -3,3 +3,5 @@ tmp/
 npm-debug.log*
 ssh-config.json
 config.json
+native/target/
+native-bin/
