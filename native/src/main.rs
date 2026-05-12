@@ -31,7 +31,7 @@ const HELP_AGENTSSHCLI: &str = r#"
 用法:
   agentsshcli list [--config <path>] [--json]
   agentsshcli exec [--config <path>] [--no-cache] [--cache-ttl <ms>] <connectionName> <command>
-  agentsshcli exec [--config <path>] [--no-cache] [--cache-ttl <ms>] --connection <name> --command <command> [--directory <dir>] [--timeout <ms>]
+  agentsshcli exec [--config <path>] [--no-cache] [--cache-ttl <ms>] --connection <name> (--command <command>|--command-file <path>) [--directory <dir>] [--timeout <ms>]
   agentsshcli upload [--config <path>] [--no-cache] [--cache-ttl <ms>] <connectionName> <localPath> <remotePath>
   agentsshcli upload [--config <path>] [--no-cache] [--cache-ttl <ms>] --connection <name> --local <path> --remote <path>
   agentsshcli download [--config <path>] [--no-cache] [--cache-ttl <ms>] <connectionName> <remotePath> <localPath>
@@ -58,7 +58,7 @@ const HELP_LIST: &str = r#"
 const HELP_EXEC: &str = r#"
 用法:
   agentsshcli exec [--config <path>] [--no-cache] [--cache-ttl <ms>] <connectionName> <command>
-  agentsshcli exec [--config <path>] [--no-cache] [--cache-ttl <ms>] --connection <name> --command <command> [--directory <dir>] [--timeout <ms>]
+  agentsshcli exec [--config <path>] [--no-cache] [--cache-ttl <ms>] --connection <name> (--command <command>|--command-file <path>) [--directory <dir>] [--timeout <ms>]
   agentsshcli help exec
   agentsshcli --version
 
@@ -186,6 +186,7 @@ struct ExecuteArgs {
     global: GlobalArgs,
     connection_name: String,
     command: String,
+    command_file: Option<String>,
     directory: Option<String>,
     timeout_ms: u64,
 }
@@ -660,6 +661,7 @@ fn parse_execute_args(argv: Vec<String>) -> AppResult<ExecuteArgs> {
             global,
             connection_name: String::new(),
             command: String::new(),
+            command_file: None,
             directory: None,
             timeout_ms: 30000,
         });
@@ -667,20 +669,30 @@ fn parse_execute_args(argv: Vec<String>) -> AppResult<ExecuteArgs> {
     let mut args = global.args.clone();
     let connection_option = take_option(&mut args, &["--connection", "-c"])?;
     let command_option = take_option(&mut args, &["--command"])?;
+    let command_file = take_option(&mut args, &["--command-file"])?;
     let directory = take_option(&mut args, &["--directory", "-d"])?;
     let timeout_value = take_option(&mut args, &["--timeout", "-t"])?;
     let connection_positional = take_positional(&mut args, "connectionName")?;
     let command_positional = take_positional(&mut args, "command")?;
     ensure_no_mixed(&connection_option, &connection_positional, "connectionName")?;
     ensure_no_mixed(&command_option, &command_positional, "command")?;
+    ensure_no_mixed(&command_file, &command_positional, "command")?;
+    if command_option.is_some() && command_file.is_some() {
+        return Err(AppError::new(
+            "command 同时使用了 --command 和 --command-file，保留一种即可",
+        ));
+    }
     ensure_no_unknown_options(&args)?;
     ensure_no_extra_positionals(&args)?;
     let connection_name = connection_option.or(connection_positional).ok_or_else(|| {
         AppError::new("缺少必填参数 connectionName 或 command，使用 --help 查看说明")
     })?;
-    let command = command_option.or(command_positional).ok_or_else(|| {
-        AppError::new("缺少必填参数 connectionName 或 command，使用 --help 查看说明")
-    })?;
+    let command = command_option.or(command_positional).unwrap_or_default();
+    if command.is_empty() && command_file.is_none() {
+        return Err(AppError::new(
+            "缺少必填参数 connectionName 或 command，使用 --help 查看说明",
+        ));
+    }
     let timeout_ms = match timeout_value {
         Some(value) => normalize_positive_u64(&value, "timeout 必须是正整数毫秒值")?,
         None => 30000,
@@ -689,6 +701,7 @@ fn parse_execute_args(argv: Vec<String>) -> AppResult<ExecuteArgs> {
         global,
         connection_name,
         command,
+        command_file,
         directory,
         timeout_ms,
     })
@@ -786,19 +799,16 @@ fn run_exec(argv: Vec<String>) -> AppResult<()> {
     }
     let configs = load_config(&parsed.global.config_path)?;
     let connection = find_connection(&configs, &parsed.connection_name)?;
-    validate_command(connection, &parsed.command)?;
+    let command = resolve_execute_command(&configs, &parsed)?;
+    validate_command(connection, &command)?;
     let remote_command = match parsed.directory {
-        Some(ref directory) => format!(
-            "cd -- {} && {}",
-            shell_json_quote(directory)?,
-            parsed.command
-        ),
-        None => parsed.command.clone(),
+        Some(ref directory) => format!("cd -- {} && {}", shell_json_quote(directory)?, command),
+        None => command.clone(),
     };
     let result = if parsed.global.no_cache {
         execute_remote_command(connection, &remote_command, parsed.timeout_ms)?
     } else {
-        request_daemon_execute(&parsed)?
+        request_daemon_execute(&parsed, &command)?
     };
     if !result.is_empty() {
         println!("{}", result);
@@ -1124,6 +1134,21 @@ fn download_file(connection: &Connection, remote_path: &str, local_path: &Path) 
     Ok(())
 }
 
+fn resolve_execute_command(configs: &[Connection], parsed: &ExecuteArgs) -> AppResult<String> {
+    let Some(command_file) = parsed.command_file.as_ref() else {
+        return Ok(parsed.command.clone());
+    };
+    let path = validate_local_path(configs, command_file, &env::current_dir()?)?;
+    // 命令文件按 UTF-8 读取，避免二进制内容或错误编码被误当作远端 shell 命令执行。
+    fs::read_to_string(&path).map_err(|error| {
+        AppError::new(format!(
+            "读取 command-file 失败: {}，{}",
+            path.display(),
+            error
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1188,6 +1213,61 @@ mod tests {
     }
 
     #[test]
+    fn parse_exec_supports_command_file() {
+        let parsed = parse_execute_args(vec![
+            "--connection".into(),
+            "server".into(),
+            "--command-file".into(),
+            "script.sh".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.connection_name, "server");
+        assert_eq!(parsed.command_file.as_deref(), Some("script.sh"));
+        assert_eq!(parsed.command, "");
+    }
+
+    #[test]
+    fn parse_exec_rejects_mixed_command_sources() {
+        let err = parse_execute_args(vec![
+            "--connection".into(),
+            "server".into(),
+            "--command".into(),
+            "pwd".into(),
+            "--command-file".into(),
+            "script.sh".into(),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("--command 和 --command-file"));
+    }
+
+    #[test]
+    fn resolve_exec_reads_multiline_command_file() {
+        let original_dir = env::current_dir().unwrap();
+        let dir = tempdir().unwrap();
+        let command_file = dir.path().join("script.sh");
+        fs::write(&command_file, "echo start\necho end\n").unwrap();
+        env::set_current_dir(dir.path()).unwrap();
+        let connection = normalize_entry(
+            serde_json::from_str(
+                r#"{"name":"server","host":"127.0.0.1","username":"root","password":"p"}"#,
+            )
+            .unwrap(),
+            0,
+        )
+        .unwrap();
+        let parsed = parse_execute_args(vec![
+            "--connection".into(),
+            "server".into(),
+            "--command-file".into(),
+            "script.sh".into(),
+        ])
+        .unwrap();
+        let command = resolve_execute_command(&[connection], &parsed).unwrap();
+        env::set_current_dir(original_dir).unwrap();
+        assert_eq!(command, "echo start\necho end\n");
+    }
+
+    #[test]
     fn socks_proxy_supports_host_port_without_scheme() {
         let proxy = parse_socks_proxy("127.0.0.1:1080").unwrap();
         assert_eq!(proxy.host, "127.0.0.1");
@@ -1229,14 +1309,14 @@ fn cache_ttl(global: &GlobalArgs) -> u64 {
     global.cache_ttl_ms.unwrap_or(DEFAULT_CACHE_TTL_MS)
 }
 
-fn request_daemon_execute(parsed: &ExecuteArgs) -> AppResult<String> {
+fn request_daemon_execute(parsed: &ExecuteArgs, command: &str) -> AppResult<String> {
     let config_path = path_absolute(&parsed.global.config_path)?;
     let request = serde_json::json!({
         "operation": "execute",
         "configPath": config_path,
         "cwd": env::current_dir()?,
         "connectionName": parsed.connection_name,
-        "command": parsed.command,
+        "command": command,
         "directory": parsed.directory,
         "timeout": parsed.timeout_ms,
         "cacheTtlMs": cache_ttl(&parsed.global),

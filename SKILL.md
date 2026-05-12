@@ -170,6 +170,7 @@ agentsshcli exec --cache-ttl 60000 "<connectionName>" "<command>"
 
 ```bash
 agentsshcli exec --connection "<connectionName>" --command "<command>" --directory "/root" --timeout 5000
+agentsshcli exec --connection "<connectionName>" --command-file "./script.sh" --timeout 5000
 agentsshcli exec --no-cache --connection "<connectionName>" --command "<command>"
 ```
 
@@ -179,6 +180,7 @@ agentsshcli exec --no-cache --connection "<connectionName>" --command "<command>
 - `<command>`: 远端命令
 - `--connection <name>`, `-c <name>`: 连接名
 - `--command <command>`: 远端命令
+- `--command-file <path>`: 从本地 UTF-8 文件读取远端命令，适合执行多行脚本，不能和 `--command` 或位置参数 `<command>` 同时使用
 - `--directory <dir>`, `-d <dir>`: 远端工作目录
 - `--timeout <ms>`, `-t <ms>`: 超时毫秒值，默认 `30000`
 - `--no-cache`: 不复用连接，必须放在连接名或 `--connection` 前
