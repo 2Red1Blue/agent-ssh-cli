@@ -61,8 +61,18 @@ jobs:
         env:
           npm_config_platform: ${{ matrix.platform }}
           npm_config_arch: ${{ matrix.arch }}
-      - run: npm publish --provenance --access public
+      - name: Publish platform package
+        shell: bash
         working-directory: npm/${{ matrix.platform }}-${{ matrix.arch }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE="@agent-ssh-cli/${{ matrix.platform }}-${{ matrix.arch }}"
+          npm publish --provenance --access public || \
+            if [ "$(npm view "${PACKAGE}@${VERSION}" version 2>/dev/null || true)" = "${VERSION}" ]; then
+              echo "${PACKAGE}@${VERSION} already published"
+            else
+              exit 1
+            fi
 
   publish-main:
     needs: publish-platform
@@ -74,5 +84,14 @@ jobs:
         with:
           node-version: 22
       - run: npm install -g npm@11.5.1
-      - run: npm ci
-      - run: npm publish --provenance --access public
+      - run: npm ci --omit=optional
+      - name: Publish main package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm publish --provenance --access public || \
+            if [ "$(npm view "agent-ssh-cli@${VERSION}" version 2>/dev/null || true)" = "${VERSION}" ]; then
+              echo "agent-ssh-cli@${VERSION} already published"
+            else
+              exit 1
+            fi
