@@ -1,7 +1,11 @@
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 #[cfg(windows)]
 use interprocess::local_socket::{
     prelude::*, GenericNamespaced, ListenerOptions, Stream as LocalSocketStream,
 };
+use rand_core::{OsRng, RngCore};
 use regex::Regex;
 use russh::keys::{load_secret_key, PrivateKeyWithHashAlg};
 use russh::{client, ChannelMsg, Disconnect, Preferred};
@@ -28,6 +32,10 @@ use url::Url;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CONFIG_DIR: &str = ".agent-ssh-cli";
 const DEFAULT_CONFIG_FILE: &str = "config.json";
+const SECRET_KEY_FILE: &str = "secret.key";
+const SECRETS_FILE: &str = "secrets.json";
+const SECRETS_VERSION: u8 = 1;
+const PASSWORD_REF_PREFIX: &str = "agentsshcli:";
 const DEFAULT_CACHE_TTL_MS: u64 = 180_000;
 const DAEMON_START_TIMEOUT_MS: u64 = 3_000;
 const DAEMON_REQUEST_TIMEOUT_MS: u64 = 86_400_000;
@@ -138,6 +146,7 @@ struct RawConnection {
     port: Option<u16>,
     username: Option<String>,
     password: Option<String>,
+    password_ref: Option<String>,
     private_key: Option<String>,
     passphrase: Option<String>,
     socks_proxy: Option<String>,
@@ -159,6 +168,7 @@ struct Connection {
     port: u16,
     username: String,
     password: Option<String>,
+    password_ref: Option<String>,
     private_key: Option<String>,
     passphrase: Option<String>,
     socks_proxy: Option<String>,
@@ -399,20 +409,31 @@ fn normalize_entry(entry: RawConnection, index: usize) -> AppResult<Connection> 
         )));
     }
     let has_password = is_non_empty(&entry.password);
+    let has_password_ref = is_non_empty(&entry.password_ref);
     let has_private_key = is_non_empty(&entry.private_key);
-    let auth_count = [has_password, has_private_key]
+    let auth_count = [has_password || has_password_ref, has_private_key]
         .iter()
         .filter(|item| **item)
         .count();
     if auth_count == 0 {
         return Err(AppError::new(format!(
-            "ssh-config.json 第 {} 项必须配置 password 或 privateKey 其中之一",
+            "ssh-config.json 第 {} 项必须配置 password、passwordRef 或 privateKey 其中之一",
             index + 1
         )));
     }
     if auth_count > 1 {
         return Err(AppError::new(format!(
             "ssh-config.json 第 {} 项同时配置了多个认证方式，只允许保留一种",
+            index + 1
+        )));
+    }
+    if entry
+        .password_ref
+        .as_ref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(AppError::new(format!(
+            "ssh-config.json 第 {} 项的 passwordRef 必须是非空字符串",
             index + 1
         )));
     }
@@ -442,6 +463,7 @@ fn normalize_entry(entry: RawConnection, index: usize) -> AppResult<Connection> 
         port,
         username,
         password: entry.password.filter(|_| has_password),
+        password_ref: entry.password_ref.filter(|_| has_password_ref),
         private_key: entry.private_key.filter(|_| has_private_key),
         passphrase: entry.passphrase,
         socks_proxy: entry.socks_proxy,
@@ -478,6 +500,235 @@ fn load_config(config_path: &Path) -> AppResult<Vec<Connection>> {
         }
     }
     Ok(configs)
+}
+
+fn load_config_for_connection(config_path: &Path) -> AppResult<Vec<Connection>> {
+    let mut configs = load_config(config_path)?;
+    resolve_password_refs(config_path, &mut configs)?;
+    Ok(configs)
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct SecretsFile {
+    version: u8,
+    items: HashMap<String, SecretItem>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SecretItem {
+    nonce: String,
+    ciphertext: String,
+}
+
+fn config_dir(config_path: &Path) -> AppResult<PathBuf> {
+    let absolute = path_absolute(config_path)?;
+    absolute
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| AppError::new("配置路径缺少父目录"))
+}
+
+fn secret_key_path(config_path: &Path) -> AppResult<PathBuf> {
+    Ok(config_dir(config_path)?.join(SECRET_KEY_FILE))
+}
+
+fn secrets_path(config_path: &Path) -> AppResult<PathBuf> {
+    Ok(config_dir(config_path)?.join(SECRETS_FILE))
+}
+
+fn load_or_create_secret_key(config_path: &Path) -> AppResult<[u8; 32]> {
+    let path = secret_key_path(config_path)?;
+    if path.exists() {
+        let encoded = fs::read_to_string(&path)?;
+        let bytes = BASE64_STANDARD
+            .decode(encoded.trim())
+            .map_err(|error| AppError::new(format!("读取本地密码密钥失败: {}", error)))?;
+        let key: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| AppError::new("本地密码密钥长度非法"))?;
+        return Ok(key);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut key = [0_u8; 32];
+    OsRng.fill_bytes(&mut key);
+    write_private_file(&path, BASE64_STANDARD.encode(key).as_bytes())?;
+    Ok(key)
+}
+
+fn load_local_secret_key(config_path: &Path) -> AppResult<[u8; 32]> {
+    let path = secret_key_path(config_path)?;
+    let encoded = fs::read_to_string(&path).map_err(|error| {
+        AppError::new(format!(
+            "读取本地密码密钥失败: {}，{}",
+            path.display(),
+            error
+        ))
+    })?;
+    let bytes = BASE64_STANDARD
+        .decode(encoded.trim())
+        .map_err(|error| AppError::new(format!("读取本地密码密钥失败: {}", error)))?;
+    bytes
+        .try_into()
+        .map_err(|_| AppError::new("本地密码密钥长度非法"))
+}
+
+fn load_secrets(config_path: &Path) -> AppResult<SecretsFile> {
+    let path = secrets_path(config_path)?;
+    if !path.exists() {
+        return Ok(SecretsFile {
+            version: SECRETS_VERSION,
+            items: HashMap::new(),
+        });
+    }
+    let raw = fs::read_to_string(&path)?;
+    let secrets: SecretsFile = serde_json::from_str(&raw)
+        .map_err(|error| AppError::new(format!("secrets.json 解析失败: {}", error)))?;
+    if secrets.version != SECRETS_VERSION {
+        return Err(AppError::new("secrets.json 版本不支持"));
+    }
+    Ok(secrets)
+}
+
+fn save_secrets(config_path: &Path, secrets: &SecretsFile) -> AppResult<()> {
+    let path = secrets_path(config_path)?;
+    let raw = serde_json::to_vec_pretty(secrets)?;
+    write_private_file(&path, &raw)
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> AppResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, bytes)?;
+    #[cfg(unix)]
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+    fs::rename(tmp, path)?;
+    Ok(())
+}
+
+fn encrypt_password(config_path: &Path, password_ref: &str, password: &str) -> AppResult<()> {
+    let key = load_or_create_secret_key(config_path)?;
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let mut nonce_bytes = [0_u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), password.as_bytes())
+        .map_err(|_| AppError::new("加密密码失败"))?;
+    let mut secrets = load_secrets(config_path)?;
+    secrets.items.insert(
+        password_ref.to_string(),
+        SecretItem {
+            nonce: BASE64_STANDARD.encode(nonce_bytes),
+            ciphertext: BASE64_STANDARD.encode(ciphertext),
+        },
+    );
+    save_secrets(config_path, &secrets)
+}
+
+fn decrypt_password(config_path: &Path, password_ref: &str) -> AppResult<String> {
+    let key = load_local_secret_key(config_path)?;
+    let secrets = load_secrets(config_path)?;
+    let item = secrets.items.get(password_ref).ok_or_else(|| {
+        AppError::new(format!(
+            "未找到 passwordRef 对应的本地密码: {}",
+            password_ref
+        ))
+    })?;
+    let nonce = BASE64_STANDARD
+        .decode(&item.nonce)
+        .map_err(|error| AppError::new(format!("本地密码 nonce 非法: {}", error)))?;
+    if nonce.len() != 12 {
+        return Err(AppError::new("本地密码 nonce 长度非法"));
+    }
+    let ciphertext = BASE64_STANDARD
+        .decode(&item.ciphertext)
+        .map_err(|error| AppError::new(format!("本地密码密文非法: {}", error)))?;
+    let plaintext = ChaCha20Poly1305::new(Key::from_slice(&key))
+        .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+        .map_err(|_| AppError::new(format!("解密本地密码失败: {}", password_ref)))?;
+    String::from_utf8(plaintext)
+        .map_err(|error| AppError::new(format!("本地密码编码非法: {}", error)))
+}
+
+fn resolve_password_refs(config_path: &Path, configs: &mut [Connection]) -> AppResult<()> {
+    for config in configs {
+        if config.password.is_none() {
+            if let Some(password_ref) = config.password_ref.as_deref() {
+                config.password = Some(decrypt_password(config_path, password_ref)?);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn password_ref_for(connection_name: &str) -> String {
+    format!("{}{}", PASSWORD_REF_PREFIX, connection_name)
+}
+
+fn migrate_plain_password_for_connection(
+    config_path: &Path,
+    connection_name: &str,
+) -> AppResult<bool> {
+    let raw = fs::read_to_string(config_path)?;
+    let mut values: Vec<serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|error| AppError::new(format!("ssh-config.json 解析失败: {}", error)))?;
+    let mut migrated = false;
+    for (index, value) in values.iter_mut().enumerate() {
+        let object = value.as_object_mut().ok_or_else(|| {
+            AppError::new(format!("ssh-config.json 第 {} 项必须是对象", index + 1))
+        })?;
+        let name = object
+            .get("name")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default();
+        if name != connection_name {
+            continue;
+        }
+        let Some(password) = object.get("password").and_then(|item| item.as_str()) else {
+            return Ok(false);
+        };
+        if password.trim().is_empty() {
+            return Ok(false);
+        }
+        let password = password.to_string();
+        let password_ref = object
+            .get("passwordRef")
+            .and_then(|item| item.as_str())
+            .filter(|item| !item.trim().is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| password_ref_for(connection_name));
+        encrypt_password(config_path, &password_ref, &password)?;
+        object.insert(
+            "password".to_string(),
+            serde_json::Value::String(String::new()),
+        );
+        object.insert(
+            "passwordRef".to_string(),
+            serde_json::Value::String(password_ref),
+        );
+        migrated = true;
+        break;
+    }
+    if migrated {
+        write_config_values(config_path, &values)?;
+    }
+    Ok(migrated)
+}
+
+fn write_config_values(config_path: &Path, values: &[serde_json::Value]) -> AppResult<()> {
+    let raw = serde_json::to_vec_pretty(values)?;
+    let tmp = config_path.with_extension("tmp");
+    fs::write(&tmp, raw)?;
+    fs::rename(tmp, config_path)?;
+    Ok(())
+}
+
+fn prepare_connection_config(config_path: &Path, connection_name: &str) -> AppResult<()> {
+    let _ = migrate_plain_password_for_connection(config_path, connection_name)?;
+    Ok(())
 }
 
 fn hash_file(path: &Path) -> AppResult<String> {
@@ -862,7 +1113,8 @@ fn run_exec(argv: Vec<String>) -> AppResult<()> {
     if parsed.global.version {
         return print_version();
     }
-    let configs = load_config(&parsed.global.config_path)?;
+    prepare_connection_config(&parsed.global.config_path, &parsed.connection_name)?;
+    let configs = load_config_for_connection(&parsed.global.config_path)?;
     let connection = find_connection(&configs, &parsed.connection_name)?;
     let command = resolve_execute_command(&configs, &parsed)?;
     validate_command(connection, &command)?;
@@ -894,7 +1146,8 @@ fn run_upload(argv: Vec<String>) -> AppResult<()> {
     if parsed.global.version {
         return print_version();
     }
-    let configs = load_config(&parsed.global.config_path)?;
+    prepare_connection_config(&parsed.global.config_path, &parsed.connection_name)?;
+    let configs = load_config_for_connection(&parsed.global.config_path)?;
     let connection = find_connection(&configs, &parsed.connection_name)?;
     if parsed.global.no_cache {
         let local_path = validate_local_path(&configs, &parsed.local_path, &env::current_dir()?)?;
@@ -914,7 +1167,8 @@ fn run_download(argv: Vec<String>) -> AppResult<()> {
     if parsed.global.version {
         return print_version();
     }
-    let configs = load_config(&parsed.global.config_path)?;
+    prepare_connection_config(&parsed.global.config_path, &parsed.connection_name)?;
+    let configs = load_config_for_connection(&parsed.global.config_path)?;
     let connection = find_connection(&configs, &parsed.connection_name)?;
     if parsed.global.no_cache {
         let local_path = validate_local_path(&configs, &parsed.local_path, &env::current_dir()?)?;
@@ -1542,7 +1796,32 @@ mod tests {
             ]"#,
         );
         let err = load_config(&path).unwrap_err();
-        assert!(err.to_string().contains("password 或 privateKey"));
+        assert!(err
+            .to_string()
+            .contains("password、passwordRef 或 privateKey"));
+    }
+
+    #[test]
+    fn passive_password_migration_hides_plain_password() {
+        let (_dir, path) = write_config(
+            r#"[{"name":"server","host":"127.0.0.1","username":"root","password":"secret"}]"#,
+        );
+        assert!(migrate_plain_password_for_connection(&path, "server").unwrap());
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("secret"));
+        assert!(raw.contains(r#""password": """#));
+        assert!(raw.contains(r#""passwordRef": "agentsshcli:server""#));
+        let configs = load_config_for_connection(&path).unwrap();
+        let connection = find_connection(&configs, "server").unwrap();
+        assert_eq!(connection.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn passive_password_migration_skips_empty_password() {
+        let (_dir, path) = write_config(
+            r#"[{"name":"server","host":"127.0.0.1","username":"root","password":"","passwordRef":"agentsshcli:server"}]"#,
+        );
+        assert!(!migrate_plain_password_for_connection(&path, "server").unwrap());
     }
 
     #[test]
@@ -1691,7 +1970,7 @@ impl DaemonState {
             runtime: tokio::runtime::Runtime::new()
                 .map_err(|error| AppError::new(format!("创建 tokio runtime 失败: {}", error)))?,
             config_snapshot: ConfigSnapshot::read(config_path)?,
-            configs: load_config(config_path)?,
+            configs: load_config_for_connection(config_path)?,
             connections: HashMap::new(),
         })
     }
@@ -2249,7 +2528,7 @@ fn reload_daemon_config_if_changed(config_path: &Path, state: &mut DaemonState) 
         state.config_snapshot = current_snapshot;
         return Ok(());
     }
-    let configs = load_config(config_path)?;
+    let configs = load_config_for_connection(config_path)?;
     state.config_snapshot = current_snapshot;
     state.configs = configs;
     state.connections.clear();

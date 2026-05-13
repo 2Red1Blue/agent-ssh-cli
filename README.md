@@ -12,7 +12,7 @@
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node.js >=18"></a>
   <a href="https://www.npmjs.com/"><img src="https://img.shields.io/badge/npm-%3E%3D8-CB3837?logo=npm&logoColor=white" alt="npm >=8"></a>
   <a href="https://github.com/sleepinginsummer/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.2.9-blue" alt="release v0.2.9"></a>
+  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.3.0-blue" alt="release v0.3.0"></a>
   <a href="https://github.com/sleepinginsummer/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
@@ -88,7 +88,7 @@ AGENT_SSH_CONFIG=/path/to/config.json
 - `name`: 连接名，必须唯一
 - `host`: SSH 主机地址
 - `username`: SSH 用户名
-- `password` / `privateKey`: 认证方式，二者必须且只能配置一个
+- `password` / `passwordRef` / `privateKey`: 认证方式，密码、密码引用、私钥三类认证只能保留一种
 - `port`: SSH 端口，默认 `22`
 - `passphrase`: 私钥口令，仅配合 `privateKey` 使用
 - `pty`: 是否分配伪终端，默认 `false`，也可通过 `exec --pty` 临时开启
@@ -100,6 +100,8 @@ AGENT_SSH_CONFIG=/path/to/config.json
 
 完整示例见 [example.config.json](example.config.json)。`~/.agent-ssh-cli/config.json` 保存真实连接信息。
 
+为防止配置文件中的密码泄露，密码认证会在第一次使用该服务器时被动加密保存：首次写入明文 `password` 后，执行 `exec`、`upload` 或 `download` 连接该服务器时，CLI 会把密码加密保存到配置目录下的 `secrets.json`，生成本地 `secret.key`，并把配置中的 `password` 置空、写入 `passwordRef`。后续运行通过 `passwordRef` 解密认证；如需修改密码，把空的 `password` 重新填成新密码，下次连接会自动覆盖旧密文。
+
 参考配置
 
 ```json
@@ -109,7 +111,8 @@ AGENT_SSH_CONFIG=/path/to/config.json
     "host": "192.0.2.10",
     "port": 22,
     "username": "root",
-    "password": "******",
+    "password": "",
+    "passwordRef": "agentsshcli:密码服务器",
     "commandBlacklist": [
       "(^|[;&|()\\s])rm(\\s|$)",
       "(^|[;&|()\\s])shutdown(\\s|$)",

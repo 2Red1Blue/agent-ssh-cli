@@ -88,6 +88,21 @@ mkdir -p ~/.agent-ssh-cli
 ~/.agent-ssh-cli/config.json
 ```
 
+为防止配置文件中的密码泄露，密码认证会在第一次使用该服务器时被动加密保存：如果目标连接的 `password` 是非空明文，下一次执行 `exec`、`upload` 或 `download` 连接该服务器前，CLI 会把密码加密写入配置目录的 `secrets.json`，生成本地 `secret.key`，并把 `config.json` 中该连接改成 `password: ""` 加 `passwordRef`。改密码时直接把空的 `password` 重新填成新密码，下一次连接会自动覆盖旧密文。私钥认证不参与这个流程。
+
+隐藏后的密码配置示例：
+
+```json
+{
+  "name": "server",
+  "host": "192.0.2.10",
+  "port": 22,
+  "username": "root",
+  "password": "",
+  "passwordRef": "agentsshcli:server"
+}
+```
+
 指定其它配置文件：
 
 ```bash

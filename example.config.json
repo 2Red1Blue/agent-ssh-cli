@@ -4,7 +4,8 @@
     "host": "192.0.2.10",
     "port": 22,
     "username": "root",
-    "password": "******",
+    "password": "",
+    "passwordRef": "agentsshcli:密码服务器",
     "allowedLocalPaths": [
       "./tmp"
     ],
