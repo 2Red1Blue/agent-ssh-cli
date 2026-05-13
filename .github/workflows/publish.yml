@@ -106,9 +106,31 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          TAG_MESSAGE="$(git tag -l --format='%(contents)' "${GITHUB_REF_NAME}" | sed '/-----BEGIN PGP SIGNATURE-----/,$d' | sed '${/^$/d;}')"
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release edit "${GITHUB_REF_NAME}" \
+            EXISTING_NOTES="$(gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body // ""')"
+            if [ -n "${TAG_MESSAGE}" ] && ! grep -Fq "${TAG_MESSAGE}" <<<"${EXISTING_NOTES}"; then
+              {
+                printf '%s\n' "${EXISTING_NOTES}"
+                [ -n "${EXISTING_NOTES}" ] && printf '\n'
+                printf '%s\n' "${TAG_MESSAGE}"
+              } > release-notes.md
+              gh release edit "${GITHUB_REF_NAME}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --notes-file release-notes.md \
+                --latest
+            else
+              gh release edit "${GITHUB_REF_NAME}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --latest
+            fi
+          elif [ -n "${TAG_MESSAGE}" ]; then
+            printf '%s\n' "${TAG_MESSAGE}" > release-notes.md
+            gh release create "${GITHUB_REF_NAME}" \
               --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes-file release-notes.md \
               --latest
           else
             gh release create "${GITHUB_REF_NAME}" \
