@@ -3,9 +3,12 @@ use interprocess::local_socket::{
     prelude::*, GenericNamespaced, ListenerOptions, Stream as LocalSocketStream,
 };
 use regex::Regex;
+use russh::keys::{load_secret_key, PrivateKeyWithHashAlg};
+use russh::{client, ChannelMsg, Disconnect, Preferred};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ssh2::Session;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -17,6 +20,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use url::Url;
 
@@ -1026,6 +1030,154 @@ fn connect_socks_proxy(connection: &Connection) -> AppResult<TcpStream> {
     Ok(stream)
 }
 
+fn read_private_key_file(connection: &Connection, private_key: &str) -> AppResult<String> {
+    fs::read_to_string(private_key).map_err(|error| {
+        AppError::new(format!(
+            "连接 {} 读取私钥失败: {}，{}",
+            connection.name, private_key, error
+        ))
+    })
+}
+
+fn is_openssh_private_key(private_key_data: &str) -> bool {
+    private_key_data.contains("-----BEGIN OPENSSH PRIVATE KEY-----")
+}
+
+fn connection_uses_openssh_private_key(connection: &Connection) -> AppResult<bool> {
+    let Some(private_key) = connection.private_key.as_deref() else {
+        return Ok(false);
+    };
+    Ok(is_openssh_private_key(&read_private_key_file(
+        connection,
+        private_key,
+    )?))
+}
+
+struct RusshClient;
+
+impl client::Handler for RusshClient {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        _server_public_key: &russh::keys::ssh_key::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+}
+
+async fn connect_russh(connection: &Connection) -> AppResult<client::Handle<RusshClient>> {
+    let private_key = connection
+        .private_key
+        .as_deref()
+        .ok_or_else(|| AppError::new(format!("连接 {} 缺少 privateKey 配置", connection.name)))?;
+    let key_pair =
+        load_secret_key(private_key, connection.passphrase.as_deref()).map_err(|error| {
+            AppError::new(format!("连接 {} 加载私钥失败: {}", connection.name, error))
+        })?;
+    let config = client::Config {
+        inactivity_timeout: Some(Duration::from_secs(30)),
+        preferred: Preferred {
+            kex: Cow::Owned(vec![
+                russh::kex::CURVE25519_PRE_RFC_8731,
+                russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+            ]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut session = client::connect(
+        Arc::new(config),
+        (connection.host.as_str(), connection.port),
+        RusshClient,
+    )
+    .await
+    .map_err(|error| AppError::new(format!("连接 {} 建立 SSH 失败: {}", connection.name, error)))?;
+    let auth = session
+        .authenticate_publickey(
+            connection.username.clone(),
+            PrivateKeyWithHashAlg::new(
+                Arc::new(key_pair),
+                session
+                    .best_supported_rsa_hash()
+                    .await
+                    .map_err(|error| {
+                        AppError::new(format!(
+                            "连接 {} 协商 RSA hash 失败: {}",
+                            connection.name, error
+                        ))
+                    })?
+                    .flatten(),
+            ),
+        )
+        .await
+        .map_err(|error| {
+            AppError::new(format!("连接 {} 公钥认证失败: {}", connection.name, error))
+        })?;
+    if !auth.success() {
+        return Err(AppError::new(format!(
+            "连接 {} 公钥认证被拒绝",
+            connection.name
+        )));
+    }
+    Ok(session)
+}
+
+async fn execute_remote_command_with_russh_async(
+    connection: &Connection,
+    remote_command: &str,
+) -> AppResult<String> {
+    let session = connect_russh(connection).await?;
+    let mut channel = session.channel_open_session().await.map_err(|error| {
+        AppError::new(format!("连接 {} 打开会话失败: {}", connection.name, error))
+    })?;
+    channel.exec(true, remote_command).await.map_err(|error| {
+        AppError::new(format!("连接 {} 执行命令失败: {}", connection.name, error))
+    })?;
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut exit_status = None;
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+            ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
+            ChannelMsg::ExitStatus { exit_status: code } => exit_status = Some(code),
+            _ => {}
+        }
+    }
+    let _ = session
+        .disconnect(Disconnect::ByApplication, "", "English")
+        .await;
+    let stdout = String::from_utf8_lossy(&stdout).trim_end().to_string();
+    let stderr = String::from_utf8_lossy(&stderr).trim_end().to_string();
+    let code = exit_status.unwrap_or(0);
+    if code != 0 {
+        let mut parts = Vec::new();
+        if !stdout.is_empty() {
+            parts.push(stdout);
+        }
+        if !stderr.is_empty() {
+            parts.push(format!("[stderr]\n{}", stderr));
+        }
+        parts.push(format!("[exit code] {}", code));
+        return Err(AppError::new(parts.join("\n")));
+    }
+    Ok(stdout)
+}
+
+fn execute_remote_command_with_russh(
+    connection: &Connection,
+    remote_command: &str,
+) -> AppResult<String> {
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|error| AppError::new(format!("创建 tokio runtime 失败: {}", error)))?;
+    runtime.block_on(execute_remote_command_with_russh_async(
+        connection,
+        remote_command,
+    ))
+}
+
 fn connect_ssh(connection: &Connection) -> AppResult<Session> {
     let tcp = if connection.socks_proxy.is_some() {
         connect_socks_proxy(connection)?
@@ -1088,6 +1240,9 @@ fn execute_remote_command(
     remote_command: &str,
     timeout_ms: u64,
 ) -> AppResult<String> {
+    if connection_uses_openssh_private_key(connection)? {
+        return execute_remote_command_with_russh(connection, remote_command);
+    }
     let session = connect_ssh(connection)?;
     // libssh2 的阻塞调用超时用于约束远端命令读写等待，避免命令长期挂起。
     session.set_timeout(timeout_ms.try_into().unwrap_or(u32::MAX));
@@ -1310,6 +1465,15 @@ fn cache_ttl(global: &GlobalArgs) -> u64 {
 }
 
 fn request_daemon_execute(parsed: &ExecuteArgs, command: &str) -> AppResult<String> {
+    let configs = load_config(&parsed.global.config_path)?;
+    let connection = find_connection(&configs, &parsed.connection_name)?;
+    if connection_uses_openssh_private_key(connection)? {
+        let remote_command = match parsed.directory.as_ref() {
+            Some(directory) => format!("cd -- {} && {}", shell_json_quote(directory)?, command),
+            None => command.to_string(),
+        };
+        return execute_remote_command_with_russh(connection, &remote_command);
+    }
     let config_path = path_absolute(&parsed.global.config_path)?;
     let request = serde_json::json!({
         "operation": "execute",
