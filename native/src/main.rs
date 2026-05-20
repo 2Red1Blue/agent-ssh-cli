@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::IpAddr;
 #[cfg(unix)]
@@ -56,7 +56,7 @@ const HELP_AGENTSSHCLI: &str = r#"
   agentsshcli --version
 
 说明:
-  agent-ssh-cli Rust 原生入口。当前 SSH 操作使用 russh 直连，缓存参数保留用于兼容旧脚本。
+  agent-ssh-cli Rust 原生入口。exec/upload/download 默认使用 Rust daemon 缓存 SSH 连接；传入 --no-cache 时才跳过缓存并直连。
 "#;
 
 const HELP_LIST: &str = r#"
@@ -2079,12 +2079,25 @@ fn ensure_daemon(socket_path: &Path, config_path: &Path) -> AppResult<()> {
         }
         Err(_) => unlink_socket_path(socket_path)?,
     }
-    spawn_daemon(socket_path, config_path)?;
-    wait_for_daemon(socket_path)
+    let log_path = daemon_log_path(config_path)?;
+    spawn_daemon(socket_path, config_path, &log_path)?;
+    wait_for_daemon(socket_path, &log_path)
 }
 
-fn spawn_daemon(socket_path: &Path, config_path: &Path) -> AppResult<()> {
+fn spawn_daemon(socket_path: &Path, config_path: &Path, log_path: &Path) -> AppResult<()> {
     let exe = env::current_exe()?;
+    let _ = fs::remove_file(log_path);
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|error| {
+            AppError::new(format!(
+                "打开 SSH 缓存进程日志失败: {}，{}",
+                log_path.display(),
+                error
+            ))
+        })?;
     let mut command = Command::new(exe);
     command
         .arg("__daemon")
@@ -2094,13 +2107,13 @@ fn spawn_daemon(socket_path: &Path, config_path: &Path) -> AppResult<()> {
         .arg(config_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(stderr))
         .current_dir(project_root()?);
     command.spawn()?;
     Ok(())
 }
 
-fn wait_for_daemon(socket_path: &Path) -> AppResult<()> {
+fn wait_for_daemon(socket_path: &Path, log_path: &Path) -> AppResult<()> {
     let start = Instant::now();
     let mut last_error = None;
     while start.elapsed() < Duration::from_millis(DAEMON_START_TIMEOUT_MS) {
@@ -2121,10 +2134,15 @@ fn wait_for_daemon(socket_path: &Path) -> AppResult<()> {
             }
         }
     }
-    Err(AppError::new(format!(
-        "启动 SSH 缓存进程失败: {}",
-        last_error.unwrap_or_else(|| "未知错误".to_string())
-    )))
+    let mut message = format!(
+        "启动 SSH 缓存进程失败: {}，日志: {}",
+        last_error.unwrap_or_else(|| "未知错误".to_string()),
+        log_path.display()
+    );
+    if let Some(stderr) = read_daemon_log_tail(log_path) {
+        message.push_str(&format!("，stderr: {}", stderr));
+    }
+    Err(AppError::new(message))
 }
 
 fn get_daemon_dir() -> AppResult<PathBuf> {
@@ -2137,6 +2155,35 @@ fn get_daemon_dir() -> AppResult<PathBuf> {
     #[cfg(unix)]
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     Ok(dir)
+}
+
+fn daemon_log_path(config_path: &Path) -> AppResult<PathBuf> {
+    let resolved = path_absolute(config_path)?;
+    let parent = resolved
+        .parent()
+        .ok_or_else(|| AppError::new("配置文件路径缺少父目录，无法创建 SSH 缓存进程日志"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(resolved.to_string_lossy().as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    Ok(parent.join(format!("agentsshcli-daemon-{}.log", &digest[..12])))
+}
+
+fn read_daemon_log_tail(log_path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(log_path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    const MAX_LOG_CHARS: usize = 1200;
+    let tail: String = trimmed
+        .chars()
+        .rev()
+        .take(MAX_LOG_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    Some(tail)
 }
 
 fn get_socket_path(config_path: &Path) -> AppResult<PathBuf> {

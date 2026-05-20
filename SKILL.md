@@ -129,9 +129,9 @@ npm test
 - `--help`, `-h`: 输出帮助
 - `--version`, `-v`: 输出版本
 
-`exec`、`upload`、`download` 默认使用 Rust daemon 连接缓存，并支持以下缓存参数：
+`exec`、`upload`、`download` 默认使用 Rust daemon 连接缓存，用于减少连续操作时重复 SSH 握手和认证的开销；只有传入 `--no-cache` 时才会跳过缓存并直连。缓存相关参数如下：
 
-- `--no-cache`: 跳过 Rust daemon 连接缓存，本次命令独立建立并关闭连接
+- `--no-cache`: 跳过 Rust daemon 连接缓存，本次命令独立建立并关闭连接，即直连模式
 - `--cache-ttl <ms>`: 设置 Rust daemon 连接缓存空闲毫秒数，默认 `180000`
 
 缓存参数属于子命令级参数，必须放在 `exec`、`upload`、`download` 后、连接名或 `--connection` 前。放在命令末尾会被当作未知参数。
@@ -324,4 +324,5 @@ agentsshcli --version
 - `timeout` 和 `cache-ttl` 必须是正整数毫秒值
 - `list` 不接受位置参数
 - `upload` / `download` 的本地路径必须位于当前工作目录、项目目录或 `allowedLocalPaths` 内
+- 出现 `启动 SSH 缓存进程失败` 通常表示本地 Rust daemon 或其 socket 启动/握手失败；如需绕过缓存验证远端命令，应在子命令后添加 `--no-cache`
 - 所有失败统一在 stderr 输出错误信息，退出码为 `1`
