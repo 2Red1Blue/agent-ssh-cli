@@ -90,6 +90,8 @@ The configuration file is an array, and each item represents one server:
 - `password` / `passwordRef` / `privateKey`: Authentication method; keep exactly one authentication type among password, password reference, and private key
 - `port`: SSH port, defaults to `22`
 - `passphrase`: Private key passphrase, only used with `privateKey`
+- `socksProxy`: SOCKS5 proxy address, for example `socks5://127.0.0.1:1080`; the scheme can also be omitted as `127.0.0.1:1080`
+- `jumpHost`: Jump host connection name, must reference another `name` in the config file
 - `pty`: Whether to allocate a pseudo-terminal, defaults to `false`; it can also be enabled per command with `exec --pty`
 - `allowedLocalPaths`: Extra local paths allowed for upload or download writes
 - `commandWhitelist`: Command whitelist regular expression array
@@ -112,11 +114,21 @@ Reference configuration
     "username": "root",
     "password": "",
     "passwordRef": "agentsshcli:password-server",
+    "jumpHost": "jump-server",
     "commandBlacklist": [
       "(^|[;&|()\\s])rm(\\s|$)",
       "(^|[;&|()\\s])shutdown(\\s|$)",
       "(^|[;&|()\\s])reboot(\\s|$)"
     ]
+  },
+  {
+    "name": "jump-server",
+    "host": "198.51.100.20",
+    "port": 22,
+    "username": "ubuntu",
+    "privateKey": "/path/to/jump_key",
+    "passphrase": "******",
+    "socksProxy": "socks5://127.0.0.1:1080"
   },
   {
     "name": "key-server",

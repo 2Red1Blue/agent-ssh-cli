@@ -91,6 +91,8 @@ AGENT_SSH_CONFIG=/path/to/config.json
 - `password` / `passwordRef` / `privateKey`: 认证方式，密码、密码引用、私钥三类认证只能保留一种
 - `port`: SSH 端口，默认 `22`
 - `passphrase`: 私钥口令，仅配合 `privateKey` 使用
+- `socksProxy`: SOCKS5 代理地址，例如 `socks5://127.0.0.1:1080`；也可省略协议写成 `127.0.0.1:1080`
+- `jumpHost`: 跳板机连接名，填写配置文件中另一台机器的 `name`
 - `pty`: 是否分配伪终端，默认 `false`，也可通过 `exec --pty` 临时开启
 - `allowedLocalPaths`: 额外允许上传或下载写入的本地路径
 - `commandWhitelist`: 命令白名单正则数组
@@ -113,11 +115,21 @@ AGENT_SSH_CONFIG=/path/to/config.json
     "username": "root",
     "password": "",
     "passwordRef": "agentsshcli:密码服务器",
+    "jumpHost": "jump-server",
     "commandBlacklist": [
       "(^|[;&|()\\s])rm(\\s|$)",
       "(^|[;&|()\\s])shutdown(\\s|$)",
       "(^|[;&|()\\s])reboot(\\s|$)"
     ]
+  },
+  {
+    "name": "jump-server",
+    "host": "198.51.100.20",
+    "port": 22,
+    "username": "ubuntu",
+    "privateKey": "/path/to/jump_key",
+    "passphrase": "******",
+    "socksProxy": "socks5://127.0.0.1:1080"
   },
   {
     "name": "密钥服务器",

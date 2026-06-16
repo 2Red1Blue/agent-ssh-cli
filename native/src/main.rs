@@ -152,6 +152,7 @@ struct RawConnection {
     private_key: Option<String>,
     passphrase: Option<String>,
     socks_proxy: Option<String>,
+    jump_host: Option<String>,
     pty: Option<bool>,
     allowed_local_paths: Option<Vec<String>>,
     command_whitelist: Option<Vec<String>>,
@@ -174,6 +175,7 @@ struct Connection {
     private_key: Option<String>,
     passphrase: Option<String>,
     socks_proxy: Option<String>,
+    jump_host: Option<String>,
     pty: Option<bool>,
     allowed_local_paths: Vec<String>,
     command_whitelist: Vec<PatternRule>,
@@ -216,6 +218,10 @@ struct SocksProxy {
     username: Option<String>,
     password: Option<String>,
 }
+
+trait SshStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+
+impl<T> SshStream for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 
 fn main() {
     if let Err(error) = run(env::args().skip(1).collect()) {
@@ -459,6 +465,25 @@ fn normalize_entry(entry: RawConnection, index: usize) -> AppResult<Connection> 
             index + 1
         )));
     }
+    if entry
+        .jump_host
+        .as_ref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(AppError::new(format!(
+            "ssh-config.json 第 {} 项的 jumpHost 必须是非空字符串",
+            index + 1
+        )));
+    }
+    if matches!(
+        entry.jump_host.as_deref().map(str::trim),
+        Some(value) if value == name
+    ) {
+        return Err(AppError::new(format!(
+            "ssh-config.json 第 {} 项的 jumpHost 不能指向自身",
+            index + 1
+        )));
+    }
     Ok(Connection {
         name,
         host,
@@ -469,6 +494,7 @@ fn normalize_entry(entry: RawConnection, index: usize) -> AppResult<Connection> 
         private_key: entry.private_key.filter(|_| has_private_key),
         passphrase: entry.passphrase,
         socks_proxy: entry.socks_proxy,
+        jump_host: entry.jump_host,
         pty: entry.pty,
         allowed_local_paths: ensure_string_array(
             entry.allowed_local_paths,
@@ -511,7 +537,25 @@ fn load_config_for_connection(
     let mut configs = load_config(config_path)?;
     let _ = find_connection(&configs, connection_name)?;
     resolve_password_ref_for_connection(config_path, &mut configs, connection_name)?;
+    resolve_jump_password_refs(config_path, &mut configs, connection_name)?;
+    validate_jump_hosts(&configs)?;
     Ok(configs)
+}
+
+fn validate_jump_hosts(configs: &[Connection]) -> AppResult<()> {
+    for connection in configs {
+        let Some(jump_name) = connection.jump_host.as_deref() else {
+            continue;
+        };
+        let jump = find_connection(configs, jump_name)?;
+        if jump.jump_host.is_some() {
+            return Err(AppError::new(format!(
+                "连接 {} 的 jumpHost {} 不能再配置 jumpHost，当前仅支持单级跳板机",
+                connection.name, jump_name
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -736,6 +780,18 @@ fn resolve_password_ref_for_connection(
         if let Some(password_ref) = config.password_ref.as_deref() {
             config.password = Some(decrypt_password(config_path, password_ref)?);
         }
+    }
+    Ok(())
+}
+
+fn resolve_jump_password_refs(
+    config_path: &Path,
+    configs: &mut [Connection],
+    connection_name: &str,
+) -> AppResult<()> {
+    let jump_name = find_connection(configs, connection_name)?.jump_host.clone();
+    if let Some(jump_name) = jump_name {
+        resolve_password_ref_for_connection(config_path, configs, &jump_name)?;
     }
     Ok(())
 }
@@ -1201,6 +1257,7 @@ fn run_exec(argv: Vec<String>) -> AppResult<()> {
     };
     let result = if parsed.global.no_cache {
         execute_remote_command(
+            &configs,
             connection,
             &remote_command,
             parsed.timeout_ms,
@@ -1228,7 +1285,13 @@ fn run_upload(argv: Vec<String>) -> AppResult<()> {
     let connection = find_connection(&configs, &parsed.connection_name)?;
     if parsed.global.no_cache {
         let local_path = validate_local_path(&configs, &parsed.local_path, &env::current_dir()?)?;
-        upload_file(connection, &local_path, &parsed.remote_path, 30000)?;
+        upload_file(
+            &configs,
+            connection,
+            &local_path,
+            &parsed.remote_path,
+            30000,
+        )?;
     } else {
         request_daemon_transfer(&parsed, "upload")?;
     }
@@ -1252,7 +1315,13 @@ fn run_download(argv: Vec<String>) -> AppResult<()> {
         if let Some(parent) = local_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        download_file(connection, &parsed.remote_path, &local_path, 30000)?;
+        download_file(
+            &configs,
+            connection,
+            &parsed.remote_path,
+            &local_path,
+            30000,
+        )?;
     } else {
         request_daemon_transfer(&parsed, "download")?;
     }
@@ -1443,7 +1512,27 @@ impl client::Handler for RusshClient {
     }
 }
 
-async fn connect_russh(connection: &Connection) -> AppResult<client::Handle<RusshClient>> {
+async fn connect_russh(
+    configs: &[Connection],
+    connection: &Connection,
+) -> AppResult<client::Handle<RusshClient>> {
+    let stream = open_connection_stream(configs, connection).await?;
+    connect_russh_over_stream(connection, stream).await
+}
+
+async fn connect_russh_direct(connection: &Connection) -> AppResult<client::Handle<RusshClient>> {
+    let stream: Box<dyn SshStream> = if connection.socks_proxy.is_some() {
+        Box::new(connect_socks_proxy(connection).await?)
+    } else {
+        Box::new(tokio::net::TcpStream::connect((connection.host.as_str(), connection.port)).await?)
+    };
+    connect_russh_over_stream(connection, stream).await
+}
+
+async fn connect_russh_over_stream(
+    connection: &Connection,
+    stream: Box<dyn SshStream>,
+) -> AppResult<client::Handle<RusshClient>> {
     let config = client::Config {
         inactivity_timeout: Some(Duration::from_secs(30)),
         preferred: Preferred {
@@ -1471,11 +1560,6 @@ async fn connect_russh(connection: &Connection) -> AppResult<client::Handle<Russ
         },
         ..Default::default()
     };
-    let stream = if connection.socks_proxy.is_some() {
-        connect_socks_proxy(connection).await?
-    } else {
-        tokio::net::TcpStream::connect((connection.host.as_str(), connection.port)).await?
-    };
     let mut session = client::connect_stream(Arc::new(config), stream, RusshClient)
         .await
         .map_err(|error| {
@@ -1483,6 +1567,37 @@ async fn connect_russh(connection: &Connection) -> AppResult<client::Handle<Russ
         })?;
     authenticate_russh(connection, &mut session).await?;
     Ok(session)
+}
+
+async fn open_connection_stream(
+    configs: &[Connection],
+    connection: &Connection,
+) -> AppResult<Box<dyn SshStream>> {
+    if let Some(jump_name) = connection.jump_host.as_deref() {
+        let jump = find_connection(configs, jump_name)?;
+        let jump_session = connect_russh_direct(jump).await?;
+        let channel = jump_session
+            .channel_open_direct_tcpip(
+                connection.host.clone(),
+                u32::from(connection.port),
+                "127.0.0.1",
+                0,
+            )
+            .await
+            .map_err(|error| {
+                AppError::new(format!(
+                    "连接 {} 通过跳板机 {} 打开直连通道失败: {}",
+                    connection.name, jump.name, error
+                ))
+            })?;
+        return Ok(Box::new(channel.into_stream()));
+    }
+    if connection.socks_proxy.is_some() {
+        return Ok(Box::new(connect_socks_proxy(connection).await?));
+    }
+    Ok(Box::new(
+        tokio::net::TcpStream::connect((connection.host.as_str(), connection.port)).await?,
+    ))
 }
 
 async fn authenticate_russh(
@@ -1596,11 +1711,12 @@ async fn execute_remote_command_with_session_async(
 }
 
 async fn execute_remote_command_async(
+    configs: &[Connection],
     connection: &Connection,
     remote_command: &str,
     pty: bool,
 ) -> AppResult<String> {
-    let session = connect_russh(connection).await?;
+    let session = connect_russh(configs, connection).await?;
     let result =
         execute_remote_command_with_session_async(&session, connection, remote_command, pty).await;
     let _ = session
@@ -1610,6 +1726,7 @@ async fn execute_remote_command_async(
 }
 
 fn execute_remote_command(
+    configs: &[Connection],
     connection: &Connection,
     remote_command: &str,
     timeout_ms: u64,
@@ -1617,7 +1734,7 @@ fn execute_remote_command(
 ) -> AppResult<String> {
     run_with_timeout(
         timeout_ms,
-        execute_remote_command_async(connection, remote_command, pty),
+        execute_remote_command_async(configs, connection, remote_command, pty),
     )
 }
 
@@ -1694,11 +1811,12 @@ async fn download_file_with_session_async(
 }
 
 async fn upload_file_async(
+    configs: &[Connection],
     connection: &Connection,
     local_path: &Path,
     remote_path: &str,
 ) -> AppResult<()> {
-    let session = connect_russh(connection).await?;
+    let session = connect_russh(configs, connection).await?;
     let result =
         upload_file_with_session_async(&session, connection, local_path, remote_path).await;
     let _ = session
@@ -1708,11 +1826,12 @@ async fn upload_file_async(
 }
 
 async fn download_file_async(
+    configs: &[Connection],
     connection: &Connection,
     remote_path: &str,
     local_path: &Path,
 ) -> AppResult<()> {
-    let session = connect_russh(connection).await?;
+    let session = connect_russh(configs, connection).await?;
     let result =
         download_file_with_session_async(&session, connection, remote_path, local_path).await;
     let _ = session
@@ -1722,6 +1841,7 @@ async fn download_file_async(
 }
 
 fn upload_file(
+    configs: &[Connection],
     connection: &Connection,
     local_path: &Path,
     remote_path: &str,
@@ -1729,11 +1849,12 @@ fn upload_file(
 ) -> AppResult<()> {
     run_with_timeout(
         timeout_ms,
-        upload_file_async(connection, local_path, remote_path),
+        upload_file_async(configs, connection, local_path, remote_path),
     )
 }
 
 fn download_file(
+    configs: &[Connection],
     connection: &Connection,
     remote_path: &str,
     local_path: &Path,
@@ -1741,7 +1862,7 @@ fn download_file(
 ) -> AppResult<()> {
     run_with_timeout(
         timeout_ms,
-        download_file_async(connection, remote_path, local_path),
+        download_file_async(configs, connection, remote_path, local_path),
     )
 }
 
@@ -2571,6 +2692,12 @@ fn handle_daemon_stream<S: Read + Write>(
         &mut state.configs,
         &request.connection_name,
     )?;
+    resolve_jump_password_refs(
+        bound_config_path,
+        &mut state.configs,
+        &request.connection_name,
+    )?;
+    validate_jump_hosts(&state.configs)?;
     let connection = find_connection(&state.configs, &request.connection_name)?.clone();
     if request.operation == "execute" {
         let command = request
@@ -2579,10 +2706,12 @@ fn handle_daemon_stream<S: Read + Write>(
             .ok_or_else(|| AppError::new("daemon execute 缺少 command"))?;
         validate_command(&connection, command)?;
     }
-    let key = build_connection_key(bound_config_path, &connection);
+    let key = build_connection_key(bound_config_path, &state.configs, &connection);
     if !state.connections.contains_key(&key) {
-        let session =
-            state.run_with_timeout(request.timeout.unwrap_or(30000), connect_russh(&connection))?;
+        let session = state.run_with_timeout(
+            request.timeout.unwrap_or(30000),
+            connect_russh(&state.configs, &connection),
+        )?;
         state.connections.insert(
             key.clone(),
             PoolEntry {
@@ -2633,7 +2762,7 @@ fn handle_daemon_stream<S: Read + Write>(
                     });
                     let session = state.run_with_timeout(
                         request.timeout.unwrap_or(30000),
-                        connect_russh(&connection),
+                        connect_russh(&state.configs, &connection),
                     )?;
                     let stdout = state
                         .run_with_timeout(
@@ -2729,7 +2858,11 @@ fn reload_daemon_config_if_changed(config_path: &Path, state: &mut DaemonState) 
     Ok(())
 }
 
-fn build_connection_key(config_path: &Path, connection: &Connection) -> String {
+fn build_connection_key(
+    config_path: &Path,
+    configs: &[Connection],
+    connection: &Connection,
+) -> String {
     let auth = if let Some(private_key) = &connection.private_key {
         format!(
             "privateKey:{}:{}",
@@ -2742,8 +2875,14 @@ fn build_connection_key(config_path: &Path, connection: &Connection) -> String {
             sensitive_hash(connection.password.as_deref().unwrap_or(""))
         )
     };
+    let jump = connection
+        .jump_host
+        .as_deref()
+        .and_then(|name| find_connection(configs, name).ok())
+        .map(connection_fingerprint)
+        .unwrap_or_else(|| "no-jump".to_string());
     let raw = format!(
-        "{}|{}|{}|{}|{}|{:?}|{}",
+        "{}|{}|{}|{}|{}|{:?}|{:?}|{}|{}",
         path_absolute(config_path)
             .unwrap_or_else(|_| canonical_or_absolute(config_path.to_path_buf()))
             .display(),
@@ -2752,11 +2891,37 @@ fn build_connection_key(config_path: &Path, connection: &Connection) -> String {
         connection.port,
         connection.username,
         connection.socks_proxy,
+        connection.jump_host,
+        jump,
         auth
     );
     let mut hasher = Sha256::new();
     hasher.update(raw.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn connection_fingerprint(connection: &Connection) -> String {
+    let auth = if let Some(private_key) = &connection.private_key {
+        format!(
+            "privateKey:{}:{}",
+            private_key,
+            sensitive_hash(connection.passphrase.as_deref().unwrap_or(""))
+        )
+    } else {
+        format!(
+            "password:{}",
+            sensitive_hash(connection.password.as_deref().unwrap_or(""))
+        )
+    };
+    format!(
+        "{}|{}|{}|{}|{:?}|{}",
+        connection.name,
+        connection.host,
+        connection.port,
+        connection.username,
+        connection.socks_proxy,
+        auth
+    )
 }
 
 fn sensitive_hash(value: &str) -> String {
