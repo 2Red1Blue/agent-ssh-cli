@@ -10,13 +10,14 @@ use regex::Regex;
 use russh::keys::{load_secret_key, PrivateKeyWithHashAlg};
 use russh::{client, ChannelMsg, Disconnect, Preferred};
 use russh_sftp::client::SftpSession;
+use russh_sftp::protocol::OpenFlags;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, SeekFrom, Write};
 use std::net::IpAddr;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -26,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use url::Url;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -41,6 +42,8 @@ const DEFAULT_CACHE_TTL_MS: u64 = 180_000;
 const DAEMON_START_TIMEOUT_MS: u64 = 3_000;
 const DAEMON_REQUEST_TIMEOUT_MS: u64 = 86_400_000;
 const DAEMON_RESPONSE_LENGTH_BYTES: usize = 8;
+const TRANSFER_CHUNK_BYTES: usize = 1024 * 1024;
+const TRANSFER_MAX_RETRIES: usize = 3;
 
 const HELP_AGENTSSHCLI: &str = r#"
 用法:
@@ -52,7 +55,8 @@ const HELP_AGENTSSHCLI: &str = r#"
   agentsshcli download [--config <path>] [--no-cache] [--cache-ttl <ms>] <connectionName> <remotePath> <localPath>
   agentsshcli download [--config <path>] [--no-cache] [--cache-ttl <ms>] --connection <name> --remote <path> --local <path>
   agentsshcli init-config
-  agentsshcli help [list|exec|upload|download]
+  agentsshcli stop-daemon [--config <path>]
+  agentsshcli help [list|exec|upload|download|stop-daemon]
   agentsshcli --help
   agentsshcli --version
 
@@ -101,6 +105,15 @@ const HELP_DOWNLOAD: &str = r#"
 
 说明:
   下载远端文件到本地。默认使用 daemon 缓存，可通过 --no-cache 直连。
+"#;
+
+const HELP_STOP_DAEMON: &str = r#"
+用法:
+  agentsshcli stop-daemon [--config <path>]
+  agentsshcli help stop-daemon
+
+说明:
+  停止当前配置文件对应的 SSH 缓存进程。这是连接池维护命令，不用于精确取消单个上传任务。
 "#;
 
 #[derive(Debug, Clone)]
@@ -203,6 +216,14 @@ struct ExecuteArgs {
     pty: Option<bool>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadResumeMeta {
+    file_size: u64,
+    modified_ms: u64,
+    chunk_bytes: usize,
+}
+
 #[derive(Debug)]
 struct TransferArgs {
     global: GlobalArgs,
@@ -244,6 +265,7 @@ fn run(argv: Vec<String>) -> AppResult<()> {
         "exec" => run_exec(args.to_vec()),
         "upload" => run_upload(args.to_vec()),
         "download" => run_download(args.to_vec()),
+        "stop-daemon" => run_stop_daemon(args.to_vec()),
         "__daemon" => run_daemon(args.to_vec()),
         _ => Err(AppError::new(format!(
             "未知命令: {}，使用 agentsshcli --help 查看说明",
@@ -264,6 +286,7 @@ fn print_help(name: &str) -> AppResult<()> {
         "exec" | "sshx" => HELP_EXEC,
         "upload" | "sshupload" => HELP_UPLOAD,
         "download" | "sshdownload" => HELP_DOWNLOAD,
+        "stop-daemon" => HELP_STOP_DAEMON,
         _ => return Err(AppError::new(format!("未知帮助命令: {}", name))),
     };
     println!("{}", help.trim());
@@ -1238,6 +1261,25 @@ fn run_list(argv: Vec<String>) -> AppResult<()> {
     Ok(())
 }
 
+fn run_stop_daemon(argv: Vec<String>) -> AppResult<()> {
+    let global = parse_global_args(argv)?;
+    if global.help {
+        return print_help("stop-daemon");
+    }
+    if global.version {
+        return print_version();
+    }
+    if !global.args.is_empty() {
+        return Err(AppError::new(format!(
+            "agentsshcli stop-daemon 不接受位置参数: {}",
+            global.args.join(" ")
+        )));
+    }
+    request_stop_daemon(&global.config_path)?;
+    println!("SSH 缓存进程已停止");
+    Ok(())
+}
+
 fn run_exec(argv: Vec<String>) -> AppResult<()> {
     let parsed = parse_execute_args(argv)?;
     if parsed.global.help {
@@ -1285,13 +1327,7 @@ fn run_upload(argv: Vec<String>) -> AppResult<()> {
     let connection = find_connection(&configs, &parsed.connection_name)?;
     if parsed.global.no_cache {
         let local_path = validate_local_path(&configs, &parsed.local_path, &env::current_dir()?)?;
-        upload_file(
-            &configs,
-            connection,
-            &local_path,
-            &parsed.remote_path,
-            30000,
-        )?;
+        upload_file(&configs, connection, &local_path, &parsed.remote_path)?;
     } else {
         request_daemon_transfer(&parsed, "upload")?;
     }
@@ -1767,26 +1803,224 @@ async fn open_sftp_session(
         })
 }
 
+fn temporary_remote_path(remote_path: &str) -> String {
+    format!("{}.part", remote_path)
+}
+
+fn temporary_remote_meta_path(remote_path: &str) -> String {
+    format!("{}.part.meta", remote_path)
+}
+
+fn build_upload_resume_meta(metadata: &std::fs::Metadata) -> UploadResumeMeta {
+    let modified_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    UploadResumeMeta {
+        file_size: metadata.len(),
+        modified_ms,
+        chunk_bytes: TRANSFER_CHUNK_BYTES,
+    }
+}
+
 async fn upload_file_with_session_async(
     session: &client::Handle<RusshClient>,
     connection: &Connection,
     local_path: &Path,
     remote_path: &str,
 ) -> AppResult<()> {
-    let sftp = open_sftp_session(session, connection).await?;
+    let local_metadata = fs::metadata(local_path)?;
+    let resume_meta = build_upload_resume_meta(&local_metadata);
+    let file_size = resume_meta.file_size;
+    let temp_remote_path = temporary_remote_path(remote_path);
+    let temp_remote_meta_path = temporary_remote_meta_path(remote_path);
+    let mut last_error: Option<AppError> = None;
+
+    // SFTP 传输不再设置总超时：大文件允许长时间运行，失败时按整次上传重试。
+    for attempt in 1..=TRANSFER_MAX_RETRIES {
+        let sftp = open_sftp_session(session, connection).await?;
+        let upload_result = upload_file_once(
+            &sftp,
+            connection,
+            local_path,
+            remote_path,
+            &temp_remote_path,
+            &temp_remote_meta_path,
+            &resume_meta,
+            file_size,
+            attempt,
+        )
+        .await;
+        let _ = sftp.close().await;
+
+        match upload_result {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < TRANSFER_MAX_RETRIES => {
+                eprintln!(
+                    "上传失败，准备重试 {}/{}: {}",
+                    attempt + 1,
+                    TRANSFER_MAX_RETRIES,
+                    error
+                );
+                last_error = Some(error);
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(AppError::new(format!(
+        "上传失败，已重试 {} 次: {}",
+        TRANSFER_MAX_RETRIES,
+        last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "未知错误".to_string())
+    )))
+}
+
+async fn upload_file_once(
+    sftp: &SftpSession,
+    connection: &Connection,
+    local_path: &Path,
+    remote_path: &str,
+    temp_remote_path: &str,
+    temp_remote_meta_path: &str,
+    resume_meta: &UploadResumeMeta,
+    file_size: u64,
+    attempt: usize,
+) -> AppResult<()> {
+    ensure_upload_resume_meta(sftp, temp_remote_path, temp_remote_meta_path, resume_meta).await?;
+    let resume_offset = resolve_upload_resume_offset(sftp, temp_remote_path, file_size).await?;
     let mut local_file = tokio::fs::File::open(local_path).await?;
+    if resume_offset > 0 {
+        local_file.seek(SeekFrom::Start(resume_offset)).await?;
+        eprintln!(
+            "发现远端临时文件，断点续传: {}/{} bytes",
+            resume_offset, file_size
+        );
+    }
+
+    let open_flags = if resume_offset > 0 {
+        OpenFlags::CREATE | OpenFlags::APPEND | OpenFlags::WRITE
+    } else {
+        OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE
+    };
     let mut remote_file = sftp
-        .create(remote_path.to_string())
+        .open_with_flags(temp_remote_path.to_string(), open_flags)
         .await
         .map_err(|error| {
             AppError::new(format!(
-                "连接 {} 创建远端文件失败: {}",
+                "连接 {} 打开远端临时文件失败: {}",
                 connection.name, error
             ))
         })?;
-    tokio::io::copy(&mut local_file, &mut remote_file).await?;
+
+    let mut buffer = vec![0_u8; TRANSFER_CHUNK_BYTES];
+    let mut uploaded = resume_offset;
+    print_upload_progress(uploaded, file_size, attempt)?;
+    loop {
+        let read_bytes = local_file.read(&mut buffer).await?;
+        if read_bytes == 0 {
+            break;
+        }
+        remote_file.write_all(&buffer[..read_bytes]).await?;
+        remote_file.flush().await?;
+        uploaded += read_bytes as u64;
+        print_upload_progress(uploaded, file_size, attempt)?;
+    }
+
     remote_file.shutdown().await?;
-    let _ = sftp.close().await;
+    verify_remote_temp_size(sftp, temp_remote_path, file_size).await?;
+    // 尽量先删除目标文件，兼容不支持覆盖 rename 的 SFTP 服务端。
+    let _ = sftp.remove_file(remote_path.to_string()).await;
+    sftp.rename(temp_remote_path.to_string(), remote_path.to_string())
+        .await
+        .map_err(|error| {
+            AppError::new(format!(
+                "连接 {} 替换远端文件失败: {}",
+                connection.name, error
+            ))
+        })?;
+    let _ = sftp.remove_file(temp_remote_meta_path.to_string()).await;
+    eprintln!("上传完成: {} bytes", file_size);
+    Ok(())
+}
+
+async fn ensure_upload_resume_meta(
+    sftp: &SftpSession,
+    temp_remote_path: &str,
+    temp_remote_meta_path: &str,
+    resume_meta: &UploadResumeMeta,
+) -> AppResult<()> {
+    let expected = serde_json::to_vec(resume_meta)?;
+    let current = match sftp.read(temp_remote_meta_path.to_string()).await {
+        Ok(bytes) => Some(bytes),
+        Err(_) => None,
+    };
+    if current.as_deref() == Some(expected.as_slice()) {
+        return Ok(());
+    }
+
+    // 本地文件特征变化时，旧 .part 不能安全续传，必须删除后重建元数据。
+    let _ = sftp.remove_file(temp_remote_path.to_string()).await;
+    let _ = sftp.remove_file(temp_remote_meta_path.to_string()).await;
+    sftp.write(temp_remote_meta_path.to_string(), &expected)
+        .await
+        .map_err(|error| AppError::new(format!("写入远端续传元数据失败: {}", error)))?;
+    Ok(())
+}
+
+async fn resolve_upload_resume_offset(
+    sftp: &SftpSession,
+    temp_remote_path: &str,
+    file_size: u64,
+) -> AppResult<u64> {
+    let metadata = match sftp.metadata(temp_remote_path.to_string()).await {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(0),
+    };
+    let remote_size = metadata.size.unwrap_or(0);
+    if remote_size == file_size {
+        return Ok(remote_size);
+    }
+    if remote_size < file_size {
+        return Ok(remote_size);
+    }
+    // 远端临时文件比本地还大，说明它不属于当前上传内容，删除后重传。
+    let _ = sftp.remove_file(temp_remote_path.to_string()).await;
+    Ok(0)
+}
+
+async fn verify_remote_temp_size(
+    sftp: &SftpSession,
+    temp_remote_path: &str,
+    expected_size: u64,
+) -> AppResult<()> {
+    let metadata = sftp
+        .metadata(temp_remote_path.to_string())
+        .await
+        .map_err(|error| AppError::new(format!("读取远端临时文件大小失败: {}", error)))?;
+    let actual_size = metadata.size.unwrap_or(0);
+    if actual_size != expected_size {
+        return Err(AppError::new(format!(
+            "远端临时文件大小不一致: 期望 {} bytes，实际 {} bytes",
+            expected_size, actual_size
+        )));
+    }
+    Ok(())
+}
+
+fn print_upload_progress(uploaded: u64, total: u64, attempt: usize) -> AppResult<()> {
+    if total == 0 {
+        eprintln!("上传进度: 100% (0/0 bytes, 第 {} 次)", attempt);
+        return Ok(());
+    }
+    let percent = uploaded.saturating_mul(100) / total;
+    eprintln!(
+        "上传进度: {}% ({}/{} bytes, 第 {} 次)",
+        percent, uploaded, total, attempt
+    );
     Ok(())
 }
 
@@ -1845,12 +2079,15 @@ fn upload_file(
     connection: &Connection,
     local_path: &Path,
     remote_path: &str,
-    timeout_ms: u64,
 ) -> AppResult<()> {
-    run_with_timeout(
-        timeout_ms,
-        upload_file_async(configs, connection, local_path, remote_path),
-    )
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|error| AppError::new(format!("创建 tokio runtime 失败: {}", error)))?;
+    runtime.block_on(upload_file_async(
+        configs,
+        connection,
+        local_path,
+        remote_path,
+    ))
 }
 
 fn download_file(
@@ -2225,6 +2462,23 @@ fn cache_ttl(global: &GlobalArgs) -> u64 {
     global.cache_ttl_ms.unwrap_or(DEFAULT_CACHE_TTL_MS)
 }
 
+fn request_stop_daemon(config_path: &Path) -> AppResult<()> {
+    let config_path = path_absolute(config_path)?;
+    let socket_path = get_socket_path(&config_path)?;
+    let mut stream = connect_socket(&socket_path, DAEMON_REQUEST_TIMEOUT_MS)?;
+    let request = serde_json::json!({
+        "operation": "stop",
+        "configPath": config_path,
+        "cwd": env::current_dir()?,
+        "connectionName": "__daemon__"
+    });
+    let line = format!("{}\n", serde_json::to_string(&request)?);
+    stream.write_all(line.as_bytes())?;
+    stream.flush()?;
+    validate_daemon_response(read_daemon_response(&mut stream)?)?;
+    Ok(())
+}
+
 fn request_daemon_execute(parsed: &ExecuteArgs, command: &str) -> AppResult<String> {
     let config_path = path_absolute(&parsed.global.config_path)?;
     let request = serde_json::json!({
@@ -2558,7 +2812,11 @@ fn run_daemon(argv: Vec<String>) -> AppResult<()> {
                             stdout: None,
                         },
                     };
+                let should_stop = response.stdout.as_deref() == Some("stop");
                 write_daemon_response(&mut stream, &response)?;
+                if should_stop {
+                    break;
+                }
                 expire_connections(&mut state.connections);
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2602,7 +2860,11 @@ fn run_daemon(argv: Vec<String>) -> AppResult<()> {
                             stdout: None,
                         },
                     };
+                let should_stop = response.stdout.as_deref() == Some("stop");
                 write_daemon_response(&mut stream, &response)?;
+                if should_stop {
+                    break;
+                }
                 expire_connections(&mut state.connections);
             }
             Err(error) => return Err(AppError::new(error.to_string())),
@@ -2675,6 +2937,13 @@ fn handle_daemon_stream<S: Read + Write>(
             ok: true,
             message: None,
             stdout: None,
+        });
+    }
+    if raw_value.get("operation").and_then(|item| item.as_str()) == Some("stop") {
+        return Ok(DaemonResponse {
+            ok: true,
+            message: None,
+            stdout: Some("stop".to_string()),
         });
     }
     let request: DaemonRequest = serde_json::from_value(raw_value)?;
@@ -2795,10 +3064,12 @@ fn handle_daemon_stream<S: Read + Write>(
                 .remote_path
                 .ok_or_else(|| AppError::new("daemon upload 缺少 remotePath"))?;
             let local_path = validate_local_path(&state.configs, &local, &request.cwd)?;
-            if let Err(error) = state.run_with_timeout(
-                request.timeout.unwrap_or(30000),
-                upload_file_with_session_async(&entry.session, &connection, &local_path, &remote),
-            ) {
+            if let Err(error) = state.runtime.block_on(upload_file_with_session_async(
+                &entry.session,
+                &connection,
+                &local_path,
+                &remote,
+            )) {
                 return Err(error);
             }
             DaemonResponse {

@@ -259,6 +259,13 @@ agentsshcli upload --no-cache --connection "<connectionName>" --local "./tmp/upl
 - `--no-cache`: 不复用连接，必须放在连接名或 `--connection` 前
 - `--cache-ttl <ms>`: 连接缓存空闲毫秒数，必须放在连接名或 `--connection` 前
 
+上传稳定性：
+
+- 上传会先写入远端 `<remotePath>.part` 临时文件，完成校验后再 rename 为正式目标文件。
+- 同时写入 `<remotePath>.part.meta` 续传元数据；本地文件大小、修改时间或分块大小变化时，会删除旧临时文件并重传，避免错误拼接。
+- 如果上传中断，下次上传同一个本地文件到同一个远端路径时，会从 `.part` 已有大小处断点续传。
+- `--no-cache` 模式可用 `Ctrl+C` 停止当前上传；daemon 模式可用 `stop-daemon` 粗暴停止连接池，但它会影响同一 daemon 内其它任务，不是精确取消单个上传。
+
 返回值：
 
 - 成功时 stdout 输出 `File uploaded successfully`

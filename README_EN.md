@@ -12,7 +12,7 @@ Remote exec · File upload · File download · Connection config · Command whit
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node.js >=18"></a>
   <a href="https://www.npmjs.com/"><img src="https://img.shields.io/badge/npm-%3E%3D8-CB3837?logo=npm&logoColor=white" alt="npm >=8"></a>
   <a href="https://github.com/sleepinginsummer/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.3.3-blue" alt="release v0.3.3"></a>
+  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.3.6-blue" alt="release v0.3.6"></a>
   <a href="https://github.com/sleepinginsummer/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
@@ -34,10 +34,16 @@ This project references the SSH operation design from [classfang/ssh-mcp-server]
 #### Its capabilities:
 - List SSH server connections from local configuration
 - Execute commands on a specified remote server
-- Upload local files to a remote server
+- Upload local files to a remote server with temporary files, resume, and retry
 - Download files from a remote server to local
 - Restrict executable commands through command allowlists and blocklists
 - Restrict upload and download access scopes through a local path allowlist
+
+## Upload Reliability
+
+Uploads are written to `<remotePath>.part` first, with resume metadata in `<remotePath>.part.meta`. After the temporary file size is verified, it is renamed to the final target path. If an upload is interrupted, running the same upload again resumes from the existing `.part` size when the local file metadata still matches.
+
+For `--no-cache` uploads, use `Ctrl+C` to stop the current CLI process. In daemon mode, `agentsshcli stop-daemon` stops the connection-pool process, but it affects other tasks in the same daemon and is not a precise per-upload cancel operation.
 
 ## AI One-Click Installation
 

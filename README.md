@@ -12,7 +12,7 @@
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node.js >=18"></a>
   <a href="https://www.npmjs.com/"><img src="https://img.shields.io/badge/npm-%3E%3D8-CB3837?logo=npm&logoColor=white" alt="npm >=8"></a>
   <a href="https://github.com/sleepinginsummer/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.3.3-blue" alt="release v0.3.3"></a>
+  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.3.6-blue" alt="release v0.3.6"></a>
   <a href="https://github.com/sleepinginsummer/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
@@ -33,10 +33,16 @@
 #### 他的能力：
 - 列出本地配置中的 SSH 服务器连接
 - 在指定远端服务器上执行命令
-- 上传本地文件到远端服务器
+- 上传本地文件到远端服务器，支持临时文件、断点续传和失败重试
 - 从远端服务器下载文件到本地
 - 通过命令黑白名单限制可执行命令
 - 通过本地路径白名单限制上传和下载访问范围
+
+## 上传稳定性
+
+上传会先写入远端 `<remotePath>.part` 临时文件，并写入 `<remotePath>.part.meta` 续传元数据；完成后校验大小，再 rename 为正式目标文件。上传中断后，下次上传同一个本地文件到同一个远端路径会从已有 `.part` 大小继续。
+
+`--no-cache` 上传可用 `Ctrl+C` 停止当前进程；daemon 模式可用 `agentsshcli stop-daemon` 停止连接池进程，但它会影响同一 daemon 内其它任务，不是精确取消单个上传。
 
 ## AI 一键安装
 
