@@ -77,7 +77,7 @@ status: active
 - `native/Cargo.toml`
 - `npm/*/package.json`
 
-当前版本策略应保持主包和平台包完全一致，例如 `0.1.0`。
+当前版本策略应保持主包和平台包完全一致，例如 `0.1.1`。
 
 ### 2. 本地验证
 
@@ -186,34 +186,102 @@ agentsshcli --help
 - 不需要长期保存 npm token
 - 可以按 tag 自动发版
 - 可以在不同 runner 上分别构建平台包
-- 发布顺序更容易标准化
+- `npm publish --provenance` 能自动生成 provenance
 
-一个合理的后续拆分是：
-
-1. `build-native` job
-2. 每个平台单独产出 artifact
-3. `publish-platform-packages` job
-4. `publish-main-package` job
-
-当前仓库已经有可继续使用的 workflow：
+当前仓库已经切到 Trusted Publishing 方案，实际使用的 workflow 是：
 
 - `.github/workflows/build-native-packages.yml`
 - `.github/workflows/publish.yml`
 
-> [!note]
-> 如果后续要做自动化，建议再补一份 workflow，明确：
-> - 触发条件
-> - tag 规范
-> - 每个平台 runner
-> - npm trusted publishing 配置
+其中 `publish.yml` 的要点是：
 
-当前仓库也支持先走 `NPM_TOKEN` secret 方案：
+- 触发条件：`workflow_dispatch` 或 `push tags: v*`
+- `permissions.id-token: write`
+- 使用 GitHub-hosted runner
+- `actions/setup-node` 版本为 Node `22.14.0`
+- npm CLI 升级到 `11.5.1`
+- 发布时直接执行 `npm publish --provenance --access public`
+- 不再使用 `NPM_TOKEN` / `NODE_AUTH_TOKEN`
 
-- GitHub repo secret 名称：`NPM_TOKEN`
-- workflow 中通过 `NODE_AUTH_TOKEN` 注入
-- `actions/setup-node` 使用 npm registry
+### 首次启用 Trusted Publishing
 
-这条路线的优点是首发更快，不需要先满足 `npm trust` 的前置条件。
+> [!warning] 首次启用时，必须先在 npm 为每个已存在的包建立 trusted publisher 关系。
+> `@2red1blue/agentsshcli` 这 6 个包目前都已经存在，因此可以直接配置。
+
+npm 官方截至 2026-06-23 的要求里，Trusted Publishing 依赖：
+
+- GitHub Actions 的 GitHub-hosted runner
+- Node `22.14.0` 或更高
+- npm `11.5.1` 或更高用于发布
+- 包必须已存在于 npm registry
+
+如果你想用 CLI 批量完成配置，先确保本地：
+
+```bash
+npm install -g npm@^11.15.0
+npm whoami
+```
+
+然后执行：
+
+```bash
+for pkg in \
+  @2red1blue/agentsshcli \
+  @2red1blue/agentsshcli-darwin-arm64 \
+  @2red1blue/agentsshcli-darwin-x64 \
+  @2red1blue/agentsshcli-linux-arm64 \
+  @2red1blue/agentsshcli-linux-x64 \
+  @2red1blue/agentsshcli-win32-x64
+do
+  npm trust github "$pkg" \
+    --repo 2Red1Blue/agent-ssh-cli \
+    --file publish.yml \
+    --allow-publish \
+    --yes
+  sleep 2
+done
+```
+
+执行后可验证：
+
+```bash
+npm trust list @2red1blue/agentsshcli
+```
+
+如果后面想撤销或重建：
+
+```bash
+npm trust list @2red1blue/agentsshcli
+npm trust revoke @2red1blue/agentsshcli --id <trust-id>
+```
+
+### 自动发版操作
+
+Trusted Publishing 配置完成后，后续发版流程就是：
+
+1. 更新版本号
+2. 运行 `npm run check:release`
+3. 运行 `npm test`
+4. 提交代码并推送
+5. 打 tag 并推送
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+GitHub Actions 会自动：
+
+1. 分平台构建 Rust 二进制
+2. 发布 5 个平台包
+3. 发布主包
+4. 创建 GitHub Release
+
+### 首发与后续发版的区别
+
+- 首发前如果包还不存在，不能先配 Trusted Publishing，必须先手工发布一次
+- 当前这 6 个包都已经存在 `0.1.0`，后续发布 `0.1.1` 及更高版本时可以直接使用 Trusted Publishing 流程
+- 切换成功后，建议删除仓库里的旧 `NPM_TOKEN` secret，避免长期凭证继续留存
 
 ## 常见问题
 

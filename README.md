@@ -12,7 +12,7 @@
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node.js >=18"></a>
   <a href="https://www.npmjs.com/"><img src="https://img.shields.io/badge/npm-%3E%3D8-CB3837?logo=npm&logoColor=white" alt="npm >=8"></a>
   <a href="https://github.com/2Red1Blue/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.0-blue" alt="release v0.1.0"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.1-blue" alt="release v0.1.1"></a>
   <a href="https://github.com/2Red1Blue/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
@@ -41,9 +41,25 @@
 
 ## AI 一键安装
 
+AI 一键安装：
+
 ```
 安装请阅读 https://github.com/2Red1Blue/agent-ssh-cli/blob/main/AI_INSTALL.md，按说明安装 CLI 并添加 `SKILL.md`。
 ```
+
+如果你希望 AI 一次性装好 CLI、`agent-ssh-cli` skill 和 `log-analyze` skill，可以直接把上面这句话发给 AI。
+
+如果你手动执行，一行命令也可以完成当前这套安装效果：
+
+```bash
+npm install -g @2red1blue/agentsshcli && agentsshcli install-ai
+```
+
+如果你是这个仓库的维护者，准备通过 GitHub Actions 自动发布 npm 包，请额外阅读：
+
+- [docs/NPM_PUBLISH_GUIDE.md](docs/NPM_PUBLISH_GUIDE.md)
+
+当前仓库的自动发版方案已经切换为 npm Trusted Publishing，不再依赖长期 `NPM_TOKEN`。
 
 如果希望 AI 直接支持日志排障，可同时安装本地 `log-analyze` skill。推荐组合：
 

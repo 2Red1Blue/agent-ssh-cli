@@ -37,12 +37,11 @@ jobs:
             platform: win32
             arch: x64
     runs-on: ${{ matrix.os }}
-    environment: npm
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.14.0
           registry-url: https://registry.npmjs.org
       - run: npm install -g npm@11.5.1
       - run: npm run check:release
@@ -65,8 +64,6 @@ jobs:
       - name: Publish platform package
         shell: bash
         working-directory: npm/${{ matrix.platform }}-${{ matrix.arch }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           PACKAGE="@2red1blue/agentsshcli-${{ matrix.platform }}-${{ matrix.arch }}"
@@ -80,19 +77,16 @@ jobs:
   publish-main:
     needs: publish-platform
     runs-on: ubuntu-24.04
-    environment: npm
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 22.14.0
           registry-url: https://registry.npmjs.org
       - run: npm install -g npm@11.5.1
       - run: npm run check:release
       - name: Publish main package
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           npm publish --provenance --access public || \
