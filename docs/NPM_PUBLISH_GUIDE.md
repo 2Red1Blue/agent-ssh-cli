@@ -77,7 +77,7 @@ status: active
 - `native/Cargo.toml`
 - `npm/*/package.json`
 
-当前版本策略应保持主包和平台包完全一致，例如 `0.1.1`。
+当前版本策略应保持主包和平台包完全一致，例如 `0.1.2`。
 
 ### 2. 本地验证
 
@@ -161,7 +161,14 @@ npm run publish:packages:dry-run
 发布后，验证最终用户安装命令：
 
 ```bash
-npm install -g @2red1blue/agentsshcli
+for npm_bin in $(which -a npm 2>/dev/null | awk '!seen[$0]++'); do
+  prefix="$("$npm_bin" prefix -g 2>/dev/null)" || continue
+  case " ${SEEN_PREFIXES:-} " in
+    *" $prefix "*) continue ;;
+  esac
+  SEEN_PREFIXES="${SEEN_PREFIXES:-} $prefix"
+  "$npm_bin" install -g @2red1blue/agentsshcli || exit 1
+done
 agentsshcli --version
 agentsshcli --help
 ```
@@ -266,8 +273,8 @@ Trusted Publishing 配置完成后，后续发版流程就是：
 5. 打 tag 并推送
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 GitHub Actions 会自动：
@@ -280,7 +287,7 @@ GitHub Actions 会自动：
 ### 首发与后续发版的区别
 
 - 首发前如果包还不存在，不能先配 Trusted Publishing，必须先手工发布一次
-- 当前这 6 个包都已经存在 `0.1.0`，后续发布 `0.1.1` 及更高版本时可以直接使用 Trusted Publishing 流程
+- 当前这 6 个包都已经存在 `0.1.0`，后续发布 `0.1.2` 及更高版本时可以直接使用 Trusted Publishing 流程
 - 切换成功后，建议删除仓库里的旧 `NPM_TOKEN` secret，避免长期凭证继续留存
 
 ## 常见问题

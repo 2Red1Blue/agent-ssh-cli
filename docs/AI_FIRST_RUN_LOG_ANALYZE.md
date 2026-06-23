@@ -2,6 +2,13 @@
 
 这份文档用于**首次安装后**，引导 AI 通过交互式问答，为 `log-analyze` 生成或更新私有 `env-map`，把它从“通用模板”补充成“适配当前团队环境”的可用 skill。
 
+适用前提：
+
+- `agentsshcli install-ai` 已完成
+- 目标客户端已经重启，能重新扫描 skills
+- 用户已经明确 `log-analyze` 要装在哪些客户端
+- 如果是多客户端安装，已经明确哪个是“主链客户端”
+
 ## 原则
 
 - 首次安装时，不要把真实 IP、hostname、JumpServer 地址、项目映射直接写进公开安装说明
@@ -64,6 +71,16 @@ AI 收集完成后，建议把这些信息整理成：
 
 当前推荐优先使用方案 1，也就是 `env-map`。
 
+如果安装流程使用了“主链 + 软链复用”：
+
+- 只需要维护主链客户端的 `env-map.md`
+- 其它客户端会共享这份映射
+
+如果安装流程使用了“分别复制”：
+
+- 每个客户端的 `env-map.md` 各自独立
+- 后续需要分别维护
+
 ## 首次安装后还要同步什么
 
 除了用户自己的 `env-map` 之外，首次安装说明还应明确两件事：
@@ -77,6 +94,16 @@ AI 收集完成后，建议把这些信息整理成：
 ~/.codex/skills/log-analyze/
   SKILL.md
   env-map.md
+```
+
+常见客户端全局 skills 根目录：
+
+```text
+Codex      -> ~/.codex/skills/
+Claude     -> ~/.claude/skills/
+OpenCode   -> ~/.config/opencode/skills/
+Hermes     -> ~/.hermes/skills/
+自定义客户端 -> 以用户提供的完整路径为准
 ```
 
 ## 最小验证命令
@@ -110,5 +137,6 @@ agentsshcli jump-exec --timeout 120000 <connection> --target <target> "ls -1 <lo
 收集完成后：
 1. 把映射写入我本地的 log-analyze `env-map`
 2. 用 agentsshcli jump-exec 做最小验证
-3. 给我一个简短总结，告诉我后续可以怎么直接使用 /log-analyze
+3. 确认当前客户端技能列表里已经能看到 log-analyze
+4. 给我一个简短总结，告诉我后续可以怎么直接使用 /log-analyze
 ```

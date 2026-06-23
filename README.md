@@ -12,7 +12,7 @@
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node.js >=18"></a>
   <a href="https://www.npmjs.com/"><img src="https://img.shields.io/badge/npm-%3E%3D8-CB3837?logo=npm&logoColor=white" alt="npm >=8"></a>
   <a href="https://github.com/2Red1Blue/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.1-blue" alt="release v0.1.1"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.2-blue" alt="release v0.1.2"></a>
   <a href="https://github.com/2Red1Blue/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
@@ -33,11 +33,17 @@
 #### 他的能力：
 - 列出本地配置中的 SSH 服务器连接
 - 在指定远端服务器上执行命令
-- 上传本地文件到远端服务器
+- 上传本地文件到远端服务器，支持临时文件、断点续传和失败重试
 - 从远端服务器下载文件到本地
 - 通过命令黑白名单限制可执行命令
 - 通过本地路径白名单限制上传和下载访问范围
 - 通过 JumpServer 跳板机以菜单 PTY 模式连接目标主机（`jump-exec` 子命令）
+
+## 上传稳定性
+
+上传会先写入远端 `<remotePath>.part` 临时文件，并写入 `<remotePath>.part.meta` 续传元数据；完成后校验大小，再 rename 为正式目标文件。上传中断后，下次上传同一个本地文件到同一个远端路径会从已有 `.part` 大小继续。
+
+`--no-cache` 上传可用 `Ctrl+C` 停止当前进程；daemon 模式可用 `agentsshcli stop-daemon` 停止连接池进程，但它会影响同一 daemon 内其它任务，不是精确取消单个上传。
 
 ## AI 一键安装
 
@@ -47,12 +53,34 @@ AI 一键安装：
 安装请阅读 https://github.com/2Red1Blue/agent-ssh-cli/blob/main/AI_INSTALL.md，按说明安装 CLI 并添加 `SKILL.md`。
 ```
 
-如果你希望 AI 一次性装好 CLI、`agent-ssh-cli` skill 和 `log-analyze` skill，可以直接把上面这句话发给 AI。
+这句话现在仍然可用。AI 读完 `AI_INSTALL.md` 后，会继续完成：
+
+- 多 npm 前缀检查与逐个全局安装
+- 交互式选择客户端：`codex` / `claude` / `opencode` / `hermes` / `custom`
+- 选择主链客户端
+- 选择其余客户端是软链复用还是分别复制
+- 安装 `agent-ssh-cli` 与 `log-analyze`
+- 初始化 `~/.agent-ssh-cli/config.json` 和主链 `env-map.md` 模板
+- 提示你重启客户端后继续交互式补配置，直到客户端里能看到 `log-analyze`
 
 如果你手动执行，一行命令也可以完成当前这套安装效果：
 
 ```bash
-npm install -g @2red1blue/agentsshcli && agentsshcli install-ai
+for npm_bin in $(which -a npm 2>/dev/null | awk '!seen[$0]++'); do
+  prefix="$("$npm_bin" prefix -g 2>/dev/null)" || continue
+  case " ${SEEN_PREFIXES:-} " in
+    *" $prefix "*) continue ;;
+  esac
+  SEEN_PREFIXES="${SEEN_PREFIXES:-} $prefix"
+  "$npm_bin" install -g @2red1blue/agentsshcli || exit 1
+done
+agentsshcli install-ai
+```
+
+如果你希望显式进入交互式客户端选择流程，也可以直接：
+
+```bash
+agentsshcli install-ai --interactive
 ```
 
 如果你是这个仓库的维护者，准备通过 GitHub Actions 自动发布 npm 包，请额外阅读：
@@ -85,13 +113,39 @@ npm install -g @2red1blue/agentsshcli && agentsshcli install-ai
 1. 全局安装：
 
 ```bash
-npm install -g @2red1blue/agentsshcli
+for npm_bin in $(which -a npm 2>/dev/null | awk '!seen[$0]++'); do
+  prefix="$("$npm_bin" prefix -g 2>/dev/null)" || continue
+  case " ${SEEN_PREFIXES:-} " in
+    *" $prefix "*) continue ;;
+  esac
+  SEEN_PREFIXES="${SEEN_PREFIXES:-} $prefix"
+  "$npm_bin" install -g @2red1blue/agentsshcli || exit 1
+done
 agentsshcli --help
 ```
 
+如果机器上同时存在多套 Node/npm（例如 Hermes、自带 Node、Homebrew Node），推荐始终按上面的“扫描 `which -a npm` 并按唯一全局前缀逐个安装”方式执行，避免 CLI 只装进其中一套工具自己的全局目录。
+
 2. 导入 SKILL.md:
 
-打开 [SKILL.md](SKILL.md)，将其添加到 agent 中。
+不再推荐手工“打开 `SKILL.md` 然后自己拷贝”作为默认流程。  
+优先使用：
+
+```bash
+agentsshcli install-ai --interactive
+```
+
+只有在以下场景才建议手工安装：
+
+- 目标客户端不是内置的 `codex / claude / opencode / hermes`
+- 用户明确要求自己指定 skills 根目录
+- 需要把 skill 装到项目级目录而不是全局目录
+
+如果是未知客户端，推荐直接用：
+
+```bash
+agentsshcli install-ai --clients custom --client-root custom=/absolute/path/to/skills
+```
 
 
 ## 配置

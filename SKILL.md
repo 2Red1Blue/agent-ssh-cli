@@ -114,9 +114,34 @@ AGENT_SSH_CONFIG=/path/to/config.json agentsshcli list
 如果 CLI 不可用但 Node/npm 正常，提示用户安装：
 
 ```bash
-npm install -g @2red1blue/agentsshcli
+for npm_bin in $(which -a npm 2>/dev/null | awk '!seen[$0]++'); do
+  prefix="$("$npm_bin" prefix -g 2>/dev/null)" || continue
+  case " ${SEEN_PREFIXES:-} " in
+    *" $prefix "*) continue ;;
+  esac
+  SEEN_PREFIXES="${SEEN_PREFIXES:-} $prefix"
+  "$npm_bin" install -g @2red1blue/agentsshcli || exit 1
+done
 agentsshcli --help
 ```
+
+如果检测到多个 `npm`（例如 Hermes 和系统/Homebrew npm 并存），应先用 `which -a npm` 找出它们，再按唯一全局前缀逐个执行安装，避免 CLI 只安装到其中一套工具的私有全局目录。
+
+如果用户想让 AI 一次性装好 CLI 和相关 skills，优先让它读取：
+
+```text
+安装请阅读 https://github.com/2Red1Blue/agent-ssh-cli/blob/main/AI_INSTALL.md，按说明安装 CLI 并添加 `SKILL.md`。
+```
+
+这条提示词在当前版本仍然有效。AI 读完后，不应只停在“复制 `SKILL.md`”这一步，而应继续完成：
+
+- 多 npm 前缀安装
+- 交互式选择客户端（`codex` / `claude` / `opencode` / `hermes` / `custom`）
+- 选择主链客户端
+- 选择其余客户端是软链复用还是分别复制
+- 初始化 `~/.agent-ssh-cli/config.json`
+- 初始化主链 `log-analyze/env-map.md` 模板
+- 提示用户重启客户端并继续交互式补配置
 
 从源码开发或本地调试时，需要先构建 Rust 原生执行器：
 
