@@ -47,5 +47,57 @@
       "(^|[;&|()\\s])shutdown(\\s|$)",
       "(^|[;&|()\\s])reboot(\\s|$)"
     ]
+  },
+  {
+    "name": "prod.jumpserver",
+    "host": "REPLACE_WITH_PROD_JUMPSERVER_HOST",
+    "port": 8390,
+    "username": "REPLACE_WITH_USER",
+    "privateKey": "/path/to/prod-jumpserver.pem",
+    "pty": true,
+    "jumpServer": {
+      "enabled": true,
+      "promptRegex": "Opt>\\s*$",
+      "shellPromptRegex": "(?m)[#$>]\\s*$",
+      "searchPrefix": "/",
+      "charDelayMs": 60,
+      "enterStrategy": "direct-then-search"
+    },
+    "commandBlacklist": [
+      "(^|[;&|()\\s])rm(\\s|$)",
+      "(^|[;&|()\\s])shutdown(\\s|$)",
+      "(^|[;&|()\\s])reboot(\\s|$)",
+      "(^|[;&|()\\s])truncate(\\s|$)",
+      "(^|[;&|()\\s])systemctl\\s+(stop|restart|reload)(\\s|$)",
+      "(^|[;&|()\\s])kill(\\s|$)",
+      ">",
+      ">>"
+    ]
+  },
+  {
+    "name": "test.jumpserver",
+    "host": "REPLACE_WITH_TEST_JUMPSERVER_HOST",
+    "port": 8390,
+    "username": "REPLACE_WITH_USER",
+    "privateKey": "/path/to/test-jumpserver.pem",
+    "pty": true,
+    "jumpServer": {
+      "enabled": true,
+      "promptRegex": "Opt>\\s*$",
+      "shellPromptRegex": "(?m)[#$>]\\s*$",
+      "searchPrefix": "/",
+      "charDelayMs": 60,
+      "enterStrategy": "direct-then-search"
+    },
+    "commandBlacklist": [
+      "(^|[;&|()\\s])rm(\\s|$)",
+      "(^|[;&|()\\s])shutdown(\\s|$)",
+      "(^|[;&|()\\s])reboot(\\s|$)",
+      "(^|[;&|()\\s])truncate(\\s|$)",
+      "(^|[;&|()\\s])systemctl\\s+(stop|restart|reload)(\\s|$)",
+      "(^|[;&|()\\s])kill(\\s|$)",
+      ">",
+      ">>"
+    ]
   }
 ]

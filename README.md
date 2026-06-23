@@ -4,7 +4,7 @@
 
 基于 CLI 的 SSH 代理工具，按 ssh-mcp-server 的能力映射为 Agent 可调用的远端操作能力。
 
-远程执行 · 文件上传 · 文件下载 · 连接配置 · 命令白名单 · 命令黑名单 · Agent Skill 集成
+远程执行 · 文件上传 · 文件下载 · 连接配置 · 命令白名单 · 命令黑名单 · Agent Skill 集成 · JumpServer 跳板机执行
 
 <p>
   <a href="https://github.com/sleepinginsummer/agent-ssh-cli"><img src="https://img.shields.io/badge/CLI-agentsshcli-2ea44f" alt="CLI agentsshcli"></a>
@@ -16,7 +16,7 @@
   <a href="https://github.com/sleepinginsummer/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
-[AI 一键安装](#ai-一键安装) · [手动安装](#手动安装) · [配置](#配置) · [卸载和清理](#卸载和清理) · [许可证](#许可证) · [友情链接](#友情链接)
+[AI 一键安装](#ai-一键安装) · [手动安装](#手动安装) · [配置](#配置) · [JumpServer 跳板机模式](#jumpserver-跳板机模式) · [卸载和清理](#卸载和清理) · [许可证](#许可证) · [友情链接](#友情链接)
 
 中文 | [English](README_EN.md)
 
@@ -37,6 +37,7 @@
 - 从远端服务器下载文件到本地
 - 通过命令黑白名单限制可执行命令
 - 通过本地路径白名单限制上传和下载访问范围
+- 通过 JumpServer 跳板机以菜单 PTY 模式连接目标主机（`jump-exec` 子命令）
 
 ## AI 一键安装
 
@@ -165,6 +166,144 @@ agentsshcli exec --pty 密码服务器 "tty"
 agentsshcli exec 密码服务器 --command-file ./script.sh --timeout 60000
 ```
 完成安装!
+
+## JumpServer 跳板机模式
+
+`jump-exec` 子命令支持通过 JumpServer 跳板机以菜单 PTY 模式登入目标主机执行命令，
+适用于线上服务器只能经堡垒机访问的场景。原有 `exec / upload / download` 直连行为
+完全不变；JumpServer 模式由连接配置中的 `jumpServer` 字段开启。
+
+### 命令格式
+
+```bash
+agentsshcli jump-exec <gatewayConnection> --target <hostOrIp> "<command>" [--timeout <ms>]
+```
+
+- `<gatewayConnection>`：在 `config.json` 中配置了 `jumpServer.enabled=true` 的连接名
+- `--target`：目标机器 hostname 或 IP（JumpServer 菜单会用它做搜索）
+- `--timeout`：可选，默认 60000ms。命令执行阶段沿用此预算，遇到高负载机器可调大
+
+> upload / download 不支持 JumpServer 模式，请改用直连。
+
+### 一次性生成跳板机配置（推荐 AI 使用）
+
+让 AI 收集完跳板机参数后，一行命令把配置写入 `~/.agent-ssh-cli/config.json`，
+无需手动编辑 JSON：
+
+```bash
+agentsshcli add-jump-server \
+  --name prod.jumpserver \
+  --host 39.108.163.91 \
+  --port 8390 \
+  --username liuzx \
+  --private-key /Users/liuzx/Downloads/liuzx-jumpserver.pem
+```
+
+子命令会自动填入：
+
+- `pty: true`
+- `jumpServer.enabled: true`
+- `jumpServer.promptRegex: "Opt>\\s*$"`（标准 JumpServer 菜单 prompt）
+- `jumpServer.shellPromptRegex: "(?m)[#$>]\\s*$"`
+- `jumpServer.searchPrefix: "/"`、`charDelayMs: 60`、`enterStrategy: "direct-then-search"`
+- 默认 `commandBlacklist`（拒绝 `rm` / `truncate` / `reboot` / `shutdown` / `systemctl stop|restart|reload` / `kill` / `>` / `>>`）
+
+文件不存在会自动创建，权限置为 `0600`。同名连接已存在时报错；加 `--force` 覆盖。
+
+### AI 交互式生成模板
+
+把下面这段贴给 AI（Claude Code / 任意 agent）即可让它带你走一遍：
+
+```
+你是 agent-ssh-cli 跳板机配置助手。请按以下顺序问我，每次只问一个问题，
+收到回答后立即更新草稿，最后用 agentsshcli add-jump-server 一次性写入。
+
+要收集的参数：
+1. 连接名（建议 prod.jumpserver / test.jumpserver，需唯一）
+2. JumpServer host（IP 或域名）
+3. SSH 端口（默认 22，跳板机通常自定义端口如 8390 / 2222）
+4. SSH 用户名
+5. 私钥绝对路径（PEM 格式，私钥需对当前用户可读）
+
+收集完执行：
+  agentsshcli add-jump-server --name <name> --host <host> --port <port> \
+    --username <user> --private-key <key>
+
+写入后用以下命令验证：
+  agentsshcli list
+  agentsshcli jump-exec <name> --target <一个已知的目标主机> "hostname"
+```
+
+### 手动编辑配置（不推荐）
+
+如需手动编辑，参考下面这段完整字段：
+
+```json
+{
+  "name": "prod.jumpserver",
+  "host": "39.108.163.91",
+  "port": 8390,
+  "username": "liuzx",
+  "privateKey": "/Users/liuzx/Downloads/liuzx-jumpserver.pem",
+  "pty": true,
+  "jumpServer": {
+    "enabled": true,
+    "promptRegex": "Opt>\\s*$",
+    "shellPromptRegex": "(?m)[#$>]\\s*$",
+    "searchPrefix": "/",
+    "charDelayMs": 60,
+    "enterStrategy": "direct-then-search"
+  },
+  "commandBlacklist": [
+    "(^|[;&|()\\s])rm(\\s|$)",
+    "(^|[;&|()\\s])truncate(\\s|$)",
+    "(^|[;&|()\\s])reboot(\\s|$)",
+    "(^|[;&|()\\s])shutdown(\\s|$)",
+    "(^|[;&|()\\s])systemctl\\s+(stop|restart|reload)(\\s|$)",
+    "(^|[;&|()\\s])kill(\\s|$)",
+    ">",
+    ">>"
+  ]
+}
+```
+
+`jumpServer` 字段说明：
+
+| 字段 | 默认值 | 说明 |
+|---|---|---|
+| `enabled` | 必填 | 必须为 `true`，`jump-exec` 才允许使用该连接 |
+| `promptRegex` | `Opt>\\s*$` | 网关菜单 prompt 正则 |
+| `shellPromptRegex` | `(?m)[#$>]\\s*$` | 进入目标后 shell prompt 正则 |
+| `searchPrefix` | `/` | 搜索模式前缀（菜单输入 `/<hostname>` 触发搜索） |
+| `charDelayMs` | 60 | 慢速发送字符延迟（毫秒），防止菜单丢字 |
+| `enterStrategy` | `direct-then-search` | `direct` = 只直接发 target；`direct-then-search` = 先直接发，超时再走搜索模式 |
+
+### 使用示例
+
+```bash
+# 单机
+agentsshcli jump-exec prod.jumpserver --target hwtf-adserving-api-02 "hostname && uptime"
+
+# 多机循环
+for host in hwtf-adserving-api-01 hwtf-adserving-api-02; do
+  echo "=== $host ==="
+  agentsshcli jump-exec prod.jumpserver --target $host "uptime"
+done
+
+# 拉日志最近 50 行
+agentsshcli jump-exec prod.jumpserver --target hwtf-adserving-api-02 \
+  "tail -50 /www/hw-adserving-api/logs/app.log"
+
+# test 环境（IP 目标）
+agentsshcli jump-exec test.jumpserver --target dz0-153 "hostname"
+```
+
+### 限制
+
+- 仅支持 PEM 私钥认证（不支持密码、不支持 passphrase 加密的私钥）
+- `upload` / `download` 不支持 JumpServer 模式（PTY 菜单环境无法保证 SFTP 通道）
+- 默认 PTY 宽度 200，防止长行被折叠破坏 marker 检测
+- 命令执行阶段超时跟随 `--timeout`（最低 10s），遇到高负载机器请调大
 
 ## 卸载和清理
 

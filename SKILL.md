@@ -1,6 +1,6 @@
 ---
 name: agent-ssh-cli
-description: 使用基于 SSH 的 CLI 安全操作已配置的远端服务器。适用于需要列出连接、远程执行命令、上传文件、下载文件，以及确认参数、返回值、配置文件位置和环境校验步骤的场景。
+description: 使用基于 SSH 的 CLI 安全操作已配置的远端服务器。适用于需要列出连接、远程执行命令、上传/下载文件、通过 JumpServer 跳板机以菜单 PTY 模式访问目标主机，以及为跳板机一键生成连接配置的场景。
 ---
 
 # agent-ssh-cli 使用说明
@@ -16,6 +16,8 @@ description: 使用基于 SSH 的 CLI 安全操作已配置的远端服务器。
 - 通过命令黑白名单限制可执行命令
 - 通过本地路径白名单限制上传和下载访问范围
 - 通过 Rust daemon 短时间缓存 SSH 连接，减少连续操作时的重复连接开销
+- **通过 JumpServer 跳板机以菜单 PTY 模式登入目标主机执行命令**（`jump-exec` 子命令）
+- **一行命令为 JumpServer 跳板机生成完整连接配置**（`add-jump-server` 子命令，AI 友好）
 - npm 安装会按当前系统自动拉取对应平台的 optional 预编译包，当前支持 macOS arm64/x64、Linux x64/arm64、Windows x64
 
 它不做的事：
@@ -129,9 +131,9 @@ npm test
 - `--help`, `-h`: 输出帮助
 - `--version`, `-v`: 输出版本
 
-`exec`、`upload`、`download` 默认使用 Rust daemon 连接缓存，用于减少连续操作时重复 SSH 握手和认证的开销；只有传入 `--no-cache` 时才会跳过缓存并直连。缓存相关参数如下：
+`exec`、`upload`、`download` 默认使用 Rust daemon 连接缓存，并支持以下缓存参数：
 
-- `--no-cache`: 跳过 Rust daemon 连接缓存，本次命令独立建立并关闭连接，即直连模式
+- `--no-cache`: 跳过 Rust daemon 连接缓存，本次命令独立建立并关闭连接
 - `--cache-ttl <ms>`: 设置 Rust daemon 连接缓存空闲毫秒数，默认 `180000`
 
 缓存参数属于子命令级参数，必须放在 `exec`、`upload`、`download` 后、连接名或 `--connection` 前。放在命令末尾会被当作未知参数。
@@ -308,6 +310,8 @@ agentsshcli help list
 agentsshcli help exec
 agentsshcli help upload
 agentsshcli help download
+agentsshcli help jump-exec
+agentsshcli help add-jump-server
 agentsshcli --version
 ```
 
@@ -315,6 +319,121 @@ agentsshcli --version
 
 - help 成功时 stdout 输出帮助文本，退出码为 `0`
 - version 成功时 stdout 输出版本号，退出码为 `0`
+
+## jump-exec（JumpServer 跳板机模式）
+
+适用场景：目标主机只能经 JumpServer 堡垒机访问。CLI 内部完成：连网关 → 等菜单 prompt → 慢速发送 target → 等 shell prompt → 执行 marker 包装命令 → 截取输出和 exit code。
+
+```bash
+agentsshcli jump-exec <gatewayConnection> --target <hostOrIp> "<command>" [--timeout <ms>]
+```
+
+参数：
+
+- `<gatewayConnection>`：在 `config.json` 中配置了 `jumpServer.enabled=true` 的连接名
+- `--target <hostOrIp>`：目标主机的 hostname 或 IP
+- `--timeout <ms>`：可选，默认 `60000`。命令执行阶段沿用此预算（最低 10s），高负载机器请调大到 `120000` 以上
+- `--config <path>`：可选，覆盖默认配置路径
+
+使用前提：
+
+- 网关连接的配置必须包含 `jumpServer.enabled=true`，可用 `add-jump-server` 子命令生成
+- 仅支持 PEM 私钥认证（不支持密码、不支持加密 passphrase 的私钥）
+- `upload` / `download` 不支持 JumpServer 模式
+
+返回值：
+
+- 成功时 stdout 输出远端命令结果（已 strip ANSI、去除 marker 和命令回显）
+- 退出码为 `0`
+- 远端命令非零退出、超时、命中黑名单、未启用 jumpServer、目标主机不存在或连接失败时，stderr 输出错误信息，退出码为 `1`
+
+使用示例：
+
+```bash
+# 单机执行
+agentsshcli jump-exec prod.jumpserver --target hwtf-adserving-api-02 "hostname && uptime"
+
+# 多机循环
+for host in hwtf-adserving-api-01 hwtf-adserving-api-02; do
+  echo "=== $host ==="
+  agentsshcli jump-exec prod.jumpserver --target $host "uptime"
+done
+
+# 高负载机器需要更长 timeout
+agentsshcli jump-exec --timeout 120000 prod.jumpserver --target hwtf-adserving-api-01 "ps aux --sort=-%cpu | head -10"
+
+# 拉日志
+agentsshcli jump-exec prod.jumpserver --target hwtf-adserving-api-02 "tail -100 /www/hw-adserving-api/logs/app.log"
+```
+
+## add-jump-server（一键生成跳板机配置，AI 优先使用）
+
+如果用户要"配置 JumpServer 跳板机 / 添加堡垒机连接 / 给 agentsshcli 加跳板机"，**优先使用此子命令**而不是手写 JSON。它会一次性把所有 `jumpServer` 字段、默认黑名单、PTY 设置写入 `~/.agent-ssh-cli/config.json`。
+
+```bash
+agentsshcli add-jump-server \
+  --name <connectionName> \
+  --host <jumpserverHost> \
+  --port <port> \
+  --username <user> \
+  --private-key <absolutePathToPem> \
+  [--force]
+```
+
+参数：
+
+- `--name`：连接名（唯一），建议 `prod.jumpserver` / `test.jumpserver` 之类的命名
+- `--host`：JumpServer SSH 地址（IP 或域名）
+- `--port`：可选，默认 `22`；跳板机通常用自定义端口如 `8390` / `2222`
+- `--username`：SSH 用户名
+- `--private-key`：私钥绝对路径，必须存在且可读，仅支持 PEM 格式
+- `--force`：可选，同名连接已存在时覆盖（默认报错）
+- `--config <path>`：可选，覆盖默认配置路径
+
+自动写入的字段：
+
+- `pty: true`
+- `jumpServer.enabled: true`
+- `jumpServer.promptRegex: "Opt>\\s*$"`（标准 JumpServer 菜单 prompt）
+- `jumpServer.shellPromptRegex: "(?m)[#$>]\\s*$"`
+- `jumpServer.searchPrefix: "/"`、`charDelayMs: 60`、`enterStrategy: "direct-then-search"`
+- 默认 `commandBlacklist`：`rm` / `truncate` / `reboot` / `shutdown` / `systemctl stop|restart|reload` / `kill` / `>` / `>>`
+
+返回值：
+
+- 成功时 stdout 输出 "已写入 新增/覆盖 连接 <name> 到 <path>" 和下一步提示
+- 退出码为 `0`
+- 同名连接已存在且未加 `--force`、私钥不存在、参数缺失时，stderr 输出错误信息，退出码为 `1`
+
+### AI 交互式收集参数流程（推荐）
+
+当用户说"加一个 JumpServer 跳板机"时，按顺序问 5 个问题，**每次只问一个**，最后一次性调用 `add-jump-server`：
+
+1. 连接名（建议命名 `prod.jumpserver` / `test.jumpserver`，需唯一）
+2. JumpServer host（IP 或域名）
+3. SSH 端口（默认 22，确认是否需要自定义）
+4. SSH 用户名
+5. 私钥绝对路径（PEM 格式）
+
+收集完执行：
+
+```bash
+agentsshcli add-jump-server --name <name> --host <host> --port <port> \
+  --username <user> --private-key <key>
+```
+
+然后用以下命令验证：
+
+```bash
+agentsshcli list
+agentsshcli jump-exec <name> --target <已知目标主机> "hostname"
+```
+
+### 何时不用 add-jump-server
+
+- 用户已经有 `~/.agent-ssh-cli/config.json` 且包含同名连接，且**不想覆盖** → 直接告诉用户当前配置已存在
+- 用户使用密码或加密私钥认证 → `add-jump-server` 不支持，需手动编辑 JSON 并参考 README
+- 用户需要自定义 `promptRegex` / `commandBlacklist` 等高级字段 → 先用 `add-jump-server` 生成基础结构，再手动修改对应字段
 
 ## 错误规则
 
@@ -324,5 +443,6 @@ agentsshcli --version
 - `timeout` 和 `cache-ttl` 必须是正整数毫秒值
 - `list` 不接受位置参数
 - `upload` / `download` 的本地路径必须位于当前工作目录、项目目录或 `allowedLocalPaths` 内
-- 出现 `启动 SSH 缓存进程失败` 通常表示本地 Rust daemon 或其 socket 启动/握手失败；如需绕过缓存验证远端命令，应在子命令后添加 `--no-cache`
+- `jump-exec` 要求网关连接已配置 `jumpServer.enabled=true`，且命令不能命中 `commandBlacklist`
+- `upload` / `download` 不支持 JumpServer 模式
 - 所有失败统一在 stderr 输出错误信息，退出码为 `1`
