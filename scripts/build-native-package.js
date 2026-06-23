@@ -11,7 +11,7 @@ const source = path.join(projectRoot, "native-bin", `${platform}-${arch}`, execu
 const packageDir = path.join(projectRoot, "npm", `${platform}-${arch}`);
 const targetDir = path.join(packageDir, "bin");
 const target = path.join(targetDir, executableName);
-const packageName = `@agent-ssh-cli/${platform}-${arch}`;
+const packageName = `@2red1blue/agentsshcli-${platform}-${arch}`;
 const version = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8")).version;
 
 const osMap = { darwin: "darwin", linux: "linux", win32: "win32" };
@@ -32,11 +32,11 @@ if (platform !== "win32") {
 const pkg = {
   name: packageName,
   version,
-  description: `agent-ssh-cli native binary for ${platform}-${arch}`,
+  description: `agentsshcli native binary for ${platform}-${arch}`,
   license: "MIT",
   repository: {
     type: "git",
-    url: "https://github.com/sleepinginsummer/agent-ssh-cli"
+    url: "https://github.com/2Red1Blue/agent-ssh-cli"
   },
   os: [osMap[platform]],
   cpu: [cpuMap[arch]],

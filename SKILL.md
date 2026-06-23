@@ -114,7 +114,7 @@ AGENT_SSH_CONFIG=/path/to/config.json agentsshcli list
 如果 CLI 不可用但 Node/npm 正常，提示用户安装：
 
 ```bash
-npm install -g agent-ssh-cli
+npm install -g @2red1blue/agentsshcli
 agentsshcli --help
 ```
 
@@ -323,6 +323,8 @@ agentsshcli --version
 ## jump-exec（JumpServer 跳板机模式）
 
 适用场景：目标主机只能经 JumpServer 堡垒机访问。CLI 内部完成：连网关 → 等菜单 prompt → 慢速发送 target → 等 shell prompt → 执行 marker 包装命令 → 截取输出和 exit code。
+
+当前实现默认按单次直连执行，不走 Rust daemon 连接缓存；这样在长日志、长输出场景下更稳定，也更接近一次排障一次连接的实际使用方式。
 
 ```bash
 agentsshcli jump-exec <gatewayConnection> --target <hostOrIp> "<command>" [--timeout <ms>]

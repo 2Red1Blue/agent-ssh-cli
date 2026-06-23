@@ -2145,21 +2145,20 @@ fn run_jump_exec(argv: Vec<String>) -> AppResult<()> {
     }
     let command = resolve_command_from_file_or_inline(&configs, &parsed.command, parsed.command_file.as_ref())?;
     validate_command(connection, &command)?;
-    let result = if parsed.global.no_cache {
-        run_with_timeout(
+    // jump-exec currently prefers one-shot execution over daemon reuse.
+    // In practice, long-running/log-heavy JumpServer sessions are more reliable
+    // without the extra cached shell/channel layer.
+    let result = run_with_timeout(
+        parsed.timeout_ms,
+        execute_via_jumpserver_async(
+            &configs,
+            connection,
+            jump_config,
+            &parsed.target,
+            &command,
             parsed.timeout_ms,
-            execute_via_jumpserver_async(
-                &configs,
-                connection,
-                jump_config,
-                &parsed.target,
-                &command,
-                parsed.timeout_ms,
-            ),
-        )?
-    } else {
-        request_daemon_jump_execute(&parsed, &command)?
-    };
+        ),
+    )?;
     if !result.is_empty() {
         println!("{}", result);
     }
@@ -3306,22 +3305,6 @@ fn request_daemon_execute(parsed: &ExecuteArgs, command: &str) -> AppResult<Stri
         "timeout": parsed.timeout_ms,
         "cacheTtlMs": cache_ttl(&parsed.global),
         "pty": parsed.pty,
-    });
-    let response = request_daemon(&config_path, &request)?;
-    Ok(response.stdout.unwrap_or_default())
-}
-
-fn request_daemon_jump_execute(parsed: &JumpExecArgs, command: &str) -> AppResult<String> {
-    let config_path = path_absolute(&parsed.global.config_path)?;
-    let request = serde_json::json!({
-        "operation": "jumpExecute",
-        "configPath": config_path,
-        "cwd": env::current_dir()?,
-        "connectionName": parsed.connection_name,
-        "command": command,
-        "target": parsed.target,
-        "timeout": parsed.timeout_ms,
-        "cacheTtlMs": cache_ttl(&parsed.global),
     });
     let response = request_daemon(&config_path, &request)?;
     Ok(response.stdout.unwrap_or_default())

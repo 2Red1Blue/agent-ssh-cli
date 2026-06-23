@@ -7,13 +7,13 @@ A CLI-based SSH agent tool that maps ssh-mcp-server capabilities into remote ope
 Remote exec · File upload · File download · Connection config · Command whitelist · Command blacklist · Agent Skill integration
 
 <p>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli"><img src="https://img.shields.io/badge/CLI-agentsshcli-2ea44f" alt="CLI agentsshcli"></a>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="License MIT"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli"><img src="https://img.shields.io/badge/CLI-agentsshcli-2ea44f" alt="CLI agentsshcli"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="License MIT"></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node.js >=18"></a>
   <a href="https://www.npmjs.com/"><img src="https://img.shields.io/badge/npm-%3E%3D8-CB3837?logo=npm&logoColor=white" alt="npm >=8"></a>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.3.3-blue" alt="release v0.3.3"></a>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.0-blue" alt="release v0.1.0"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
 [AI One-Click Installation](#ai-one-click-installation) · [Manual Installation](#manual-installation) · [Configuration](#configuration) · [Uninstall and Cleanup](#uninstall-and-cleanup) · [License](#license) · [Friendly Links](#friendly-links)
@@ -42,7 +42,7 @@ This project references the SSH operation design from [classfang/ssh-mcp-server]
 ## AI One-Click Installation
 
 ```text
-Please read https://github.com/sleepinginsummer/agent-ssh-cli/blob/main/AI_INSTALL.md, follow the instructions to install the CLI, and add `SKILL.md`.
+Please read https://github.com/2Red1Blue/agent-ssh-cli/blob/main/AI_INSTALL.md, follow the instructions to install the CLI, and add `SKILL.md`.
 ```
 
 ## Manual Installation
@@ -59,7 +59,7 @@ Please read https://github.com/sleepinginsummer/agent-ssh-cli/blob/main/AI_INSTA
 1. Install globally:
 
 ```bash
-npm install -g agent-ssh-cli
+npm install -g @2red1blue/agentsshcli
 agentsshcli --help
 ```
 
@@ -172,13 +172,13 @@ Installation is complete.
 Update to the latest version:
 
 ```bash
-npm install -g agent-ssh-cli@latest
+npm install -g @2red1blue/agentsshcli@latest
 ```
 
 Remove:
 
 ```bash
-npm uninstall -g agent-ssh-cli
+npm uninstall -g @2red1blue/agentsshcli
 npm cache clean --force
 # Delete the configuration file
 rm -rf ~/.agent-ssh-cli

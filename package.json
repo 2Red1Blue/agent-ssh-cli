@@ -1,6 +1,6 @@
 {
-  "name": "agent-ssh-cli",
-  "version": "0.3.5",
+  "name": "@2red1blue/agentsshcli",
+  "version": "0.1.0",
   "description": "基于 CLI 的 SSH 代理工具，按 ssh-mcp-server 的能力一一映射",
   "type": "module",
   "engines": {
@@ -9,7 +9,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/sleepinginsummer/agent-ssh-cli"
+    "url": "https://github.com/2Red1Blue/agent-ssh-cli"
   },
   "files": [
     "bin/",
@@ -24,13 +24,16 @@
     "build:native": "cargo build --release --manifest-path native/Cargo.toml",
     "test:native": "cargo test --manifest-path native/Cargo.toml",
     "build:native-bin": "node scripts/build-native-bin.js",
-    "build:native-package": "npm run build:native-bin && node scripts/build-native-package.js"
+    "build:native-package": "npm run build:native-bin && node scripts/build-native-package.js",
+    "check:release": "node scripts/check-release.js",
+    "publish:packages": "node scripts/publish-packages.js",
+    "publish:packages:dry-run": "node scripts/publish-packages.js --dry-run"
   },
   "optionalDependencies": {
-    "@agent-ssh-cli/darwin-arm64": "0.3.5",
-    "@agent-ssh-cli/darwin-x64": "0.3.5",
-    "@agent-ssh-cli/linux-arm64": "0.3.5",
-    "@agent-ssh-cli/linux-x64": "0.3.5",
-    "@agent-ssh-cli/win32-x64": "0.3.5"
+    "@2red1blue/agentsshcli-darwin-arm64": "0.1.0",
+    "@2red1blue/agentsshcli-darwin-x64": "0.1.0",
+    "@2red1blue/agentsshcli-linux-arm64": "0.1.0",
+    "@2red1blue/agentsshcli-linux-x64": "0.1.0",
+    "@2red1blue/agentsshcli-win32-x64": "0.1.0"
   }
 }

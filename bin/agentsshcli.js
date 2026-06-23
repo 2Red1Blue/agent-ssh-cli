@@ -14,7 +14,7 @@ function getExecutableName() {
 }
 
 function getPlatformPackageBinary() {
-  const packageName = `@agent-ssh-cli/${process.platform}-${process.arch}`;
+  const packageName = `@2red1blue/agentsshcli-${process.platform}-${process.arch}`;
   try {
     const packageJsonPath = require.resolve(`${packageName}/package.json`);
     return path.join(path.dirname(packageJsonPath), "bin", getExecutableName());

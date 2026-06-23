@@ -7,13 +7,13 @@
 远程执行 · 文件上传 · 文件下载 · 连接配置 · 命令白名单 · 命令黑名单 · Agent Skill 集成 · JumpServer 跳板机执行
 
 <p>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli"><img src="https://img.shields.io/badge/CLI-agentsshcli-2ea44f" alt="CLI agentsshcli"></a>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="License MIT"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli"><img src="https://img.shields.io/badge/CLI-agentsshcli-2ea44f" alt="CLI agentsshcli"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="License MIT"></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node.js >=18"></a>
   <a href="https://www.npmjs.com/"><img src="https://img.shields.io/badge/npm-%3E%3D8-CB3837?logo=npm&logoColor=white" alt="npm >=8"></a>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.3.3-blue" alt="release v0.3.3"></a>
-  <a href="https://github.com/sleepinginsummer/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.0-blue" alt="release v0.1.0"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
 [AI 一键安装](#ai-一键安装) · [手动安装](#手动安装) · [配置](#配置) · [JumpServer 跳板机模式](#jumpserver-跳板机模式) · [卸载和清理](#卸载和清理) · [许可证](#许可证) · [友情链接](#友情链接)
@@ -42,8 +42,17 @@
 ## AI 一键安装
 
 ```
-安装请阅读 https://github.com/sleepinginsummer/agent-ssh-cli/blob/main/AI_INSTALL.md，按说明安装 CLI 并添加 `SKILL.md`。
+安装请阅读 https://github.com/2Red1Blue/agent-ssh-cli/blob/main/AI_INSTALL.md，按说明安装 CLI 并添加 `SKILL.md`。
 ```
+
+如果希望 AI 直接支持日志排障，可同时安装本地 `log-analyze` skill。推荐组合：
+
+- `agent-ssh-cli`：负责 JumpServer / SSH 执行
+- `log-analyze`：负责环境识别、target 映射、日志排查流程
+
+首次安装后，如果要让 AI 交互式补齐你自己的环境映射，请参考：
+
+- [docs/AI_FIRST_RUN_LOG_ANALYZE.md](docs/AI_FIRST_RUN_LOG_ANALYZE.md)
 
 ## 手动安装
 ### 环境要求
@@ -60,7 +69,7 @@
 1. 全局安装：
 
 ```bash
-npm install -g agent-ssh-cli
+npm install -g @2red1blue/agentsshcli
 agentsshcli --help
 ```
 
@@ -310,13 +319,13 @@ agentsshcli jump-exec test.jumpserver --target dz0-153 "hostname"
 更新到最新版：
 
 ```bash
-npm install -g agent-ssh-cli@latest
+npm install -g @2red1blue/agentsshcli@latest
 ```
 
 卸载:
 
 ```bash
-npm uninstall -g agent-ssh-cli
+npm uninstall -g @2red1blue/agentsshcli
 npm cache clean --force
 #删除配置文件
 rm -rf ~/.agent-ssh-cli

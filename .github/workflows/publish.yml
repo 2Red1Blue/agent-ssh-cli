@@ -43,7 +43,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          registry-url: https://registry.npmjs.org
       - run: npm install -g npm@11.5.1
+      - run: npm ci --omit=optional
+      - run: npm run check:release
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -51,7 +54,6 @@ jobs:
         if: runner.os == 'Windows'
         run: echo "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - run: cargo --version
-      - run: npm install --package-lock-only --omit=optional --ignore-scripts
       - run: cargo build --release --manifest-path native/Cargo.toml --target ${{ matrix.target }}
       - run: node scripts/build-native-bin.js
         env:
@@ -64,9 +66,11 @@ jobs:
       - name: Publish platform package
         shell: bash
         working-directory: npm/${{ matrix.platform }}-${{ matrix.arch }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          PACKAGE="@agent-ssh-cli/${{ matrix.platform }}-${{ matrix.arch }}"
+          PACKAGE="@2red1blue/agentsshcli-${{ matrix.platform }}-${{ matrix.arch }}"
           npm publish --provenance --access public || \
             if [ "$(npm view "${PACKAGE}@${VERSION}" version 2>/dev/null || true)" = "${VERSION}" ]; then
               echo "${PACKAGE}@${VERSION} already published"
@@ -83,15 +87,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          registry-url: https://registry.npmjs.org
       - run: npm install -g npm@11.5.1
-      - run: npm install --package-lock-only --omit=optional --ignore-scripts
+      - run: npm ci --omit=optional
+      - run: npm run check:release
       - name: Publish main package
         shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           npm publish --provenance --access public || \
-            if [ "$(npm view "agent-ssh-cli@${VERSION}" version 2>/dev/null || true)" = "${VERSION}" ]; then
-              echo "agent-ssh-cli@${VERSION} already published"
+            if [ "$(npm view "@2red1blue/agentsshcli@${VERSION}" version 2>/dev/null || true)" = "${VERSION}" ]; then
+              echo "@2red1blue/agentsshcli@${VERSION} already published"
             else
               exit 1
             fi
