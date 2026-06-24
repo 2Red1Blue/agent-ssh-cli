@@ -62,7 +62,7 @@ const HELP_AGENTSSHCLI: &str = r#"
   agentsshcli download [--config <path>] [--no-cache] [--cache-ttl <ms>] --connection <name> --remote <path> --local <path>
   agentsshcli jump-search [--config <path>] [--timeout <ms>] [--total-timeout <ms>] <gatewayConnection> <query>
   agentsshcli jump-exec [--config <path>] [--no-cache] [--cache-ttl <ms>] [--timeout <ms>] <gatewayConnection> --target <hostOrIp> <command>
-  agentsshcli add-jump-server [--config <path>] --name <name> --host <host> [--port <port>] --username <user> --private-key <path> [--force]
+  agentsshcli add-jump-server [--config <path>] --name <name> --host <host> [--port <port>] --username <user> --private-key <path> [--force] [--dry-run]
   agentsshcli init-config
   agentsshcli stop-daemon [--config <path>]
   agentsshcli help [list|exec|upload|download|jump-search|jump-exec|add-jump-server|stop-daemon]
@@ -118,7 +118,7 @@ const HELP_JUMP_EXEC: &str = r#"
 
 const HELP_ADD_JUMP_SERVER: &str = r#"
 用法:
-  agentsshcli add-jump-server [--config <path>] --name <name> --host <host> [--port <port>] --username <user> --private-key <path> [--force]
+  agentsshcli add-jump-server [--config <path>] --name <name> --host <host> [--port <port>] --username <user> --private-key <path> [--force] [--dry-run]
   agentsshcli help add-jump-server
 
 说明:
@@ -127,15 +127,17 @@ const HELP_ADD_JUMP_SERVER: &str = r#"
   enterStrategy=direct-then-search）和常用 commandBlacklist。
   若 config.json 不存在会自动创建并设置 0600 权限。
   同名连接已存在时报错，加 --force 覆盖。
-  适合 AI 收集完跳板机参数后一次性写入，无需手动编辑 JSON。
+  支持先加 --dry-run 做参数预检，确认端口、私钥和连接名都没问题后再正式写入。
+  适合 AI 收集完跳板机参数后先预检、再一次性写入，无需手动编辑 JSON。
 
 参数:
   --name           连接名（唯一），建议 prod.jumpserver / test.jumpserver
   --host           JumpServer SSH 地址
-  --port           SSH 端口，默认 22
+  --port           SSH 端口，默认 8390（更贴近常见 JumpServer 场景）
   --username       SSH 用户名
-  --private-key    私钥路径（必须可读，目前仅支持 PEM 密钥认证）
+  --private-key    私钥路径（必须存在且可被 SSH 栈加载）
   --force          覆盖同名连接（默认报错）
+  --dry-run        只预检参数，不写入 config.json
 "#;
 
 const HELP_LIST: &str = r#"
@@ -3330,6 +3332,31 @@ fn build_jump_server_entry(
     })
 }
 
+fn validate_jump_server_private_key(private_key: &str) -> AppResult<()> {
+    let key_path = Path::new(private_key);
+    if !key_path.exists() {
+        return Err(AppError::new(format!(
+            "私钥不存在: {}",
+            key_path.display()
+        )));
+    }
+    fs::metadata(key_path).map_err(|error| {
+        AppError::new(format!(
+            "私钥不可读: {}，{}",
+            key_path.display(),
+            error
+        ))
+    })?;
+    load_secret_key(private_key, None).map_err(|error| {
+        AppError::new(format!(
+            "私钥无法被当前 SSH 栈加载: {}，{}",
+            key_path.display(),
+            error
+        ))
+    })?;
+    Ok(())
+}
+
 fn run_add_jump_server(argv: Vec<String>) -> AppResult<()> {
     let global = parse_global_args(argv)?;
     if global.help {
@@ -3349,7 +3376,8 @@ fn run_add_jump_server(argv: Vec<String>) -> AppResult<()> {
     let private_key = take_option(&mut args, &["--private-key", "-k"])?
         .ok_or_else(|| AppError::new("缺少 --private-key 参数"))?;
     let force = args.iter().any(|item| item == "--force");
-    args.retain(|item| item != "--force");
+    let dry_run = args.iter().any(|item| item == "--dry-run");
+    args.retain(|item| item != "--force" && item != "--dry-run");
     ensure_no_unknown_options(&args)?;
     ensure_no_extra_positionals(&args)?;
 
@@ -3374,27 +3402,13 @@ fn run_add_jump_server(argv: Vec<String>) -> AppResult<()> {
         Some(value) => value
             .parse::<u16>()
             .map_err(|_| AppError::new("--port 必须是 1-65535 的整数"))?,
-        None => 22,
+        None => 8390,
     };
     if port == 0 {
         return Err(AppError::new("--port 不能为 0"));
     }
 
-    let key_path = Path::new(&private_key);
-    if !key_path.exists() {
-        return Err(AppError::new(format!(
-            "私钥不存在: {}",
-            key_path.display()
-        )));
-    }
-    // 验证私钥可读
-    fs::metadata(key_path).map_err(|error| {
-        AppError::new(format!(
-            "私钥不可读: {}，{}",
-            key_path.display(),
-            error
-        ))
-    })?;
+    validate_jump_server_private_key(&private_key)?;
 
     let config_path = global.config_path.clone();
     if let Some(parent) = config_path.parent() {
@@ -3438,6 +3452,20 @@ fn run_add_jump_server(argv: Vec<String>) -> AppResult<()> {
         None => entries.push(new_entry),
     }
 
+    if dry_run {
+        println!("参数校验通过：");
+        println!("- 连接名: {}", name);
+        println!("- 地址: {}:{}", host, port);
+        println!("- 用户: {}", username);
+        println!("- 私钥可读且可被当前 SSH 栈加载: {}", private_key);
+        println!(
+            "- 连接名{}",
+            if existing_index.is_some() { "已存在，正式写入时需配合 --force" } else { "不冲突" }
+        );
+        println!("去掉 --dry-run 后即可正式写入配置。");
+        return Ok(());
+    }
+
     let raw = serde_json::to_vec_pretty(&entries)?;
     write_private_file(&config_path, &raw)?;
     println!(
@@ -3460,6 +3488,15 @@ fn run_add_jump_server(argv: Vec<String>) -> AppResult<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    const TEST_OPENSSH_PRIVATE_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n\
+QyNTUxOQAAACDi33mW7HNNNR/aW2QMsLQUlR+gUFzgVquBUkyBMzMuIgAAAKhHRBpPR0Qa\n\
+TwAAAAtzc2gtZWQyNTUxOQAAACDi33mW7HNNNR/aW2QMsLQUlR+gUFzgVquBUkyBMzMuIg\n\
+AAAEDyeXVh86D5MiczKIZGgs3LJvraN+0zffuRbHKrv5gzlOLfeZbsc001H9pbZAywtBSV\n\
+H6BQXOBWq4FSTIEzMy4iAAAAImxpdXp4QGxpdXpoaXhpbmRlTWFjQm9vay1Qcm8ubG9jYW\n\
+wBAgM=\n\
+-----END OPENSSH PRIVATE KEY-----\n";
 
     fn write_config(content: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempdir().unwrap();
@@ -4045,12 +4082,16 @@ mod tests {
         assert!(entry["commandBlacklist"].as_array().unwrap().len() >= 6);
     }
 
+    fn write_test_private_key(path: &Path) {
+        fs::write(path, TEST_OPENSSH_PRIVATE_KEY).unwrap();
+    }
+
     #[test]
     fn add_jump_server_appends_to_new_config() {
         let dir = tempdir().unwrap();
         let cfg = dir.path().join("config.json");
         let key = dir.path().join("k.pem");
-        fs::write(&key, "x").unwrap();
+        write_test_private_key(&key);
         run_add_jump_server(vec![
             "--config".into(),
             cfg.display().to_string(),
@@ -4078,7 +4119,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cfg = dir.path().join("config.json");
         let key = dir.path().join("k.pem");
-        fs::write(&key, "x").unwrap();
+        write_test_private_key(&key);
         let base_args = || {
             vec![
                 "--config".into(),
@@ -4127,7 +4168,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cfg = dir.path().join("config.json");
         let key = dir.path().join("k.pem");
-        fs::write(&key, "x").unwrap();
+        write_test_private_key(&key);
         let err = run_add_jump_server(vec![
             "--config".into(),
             cfg.display().to_string(),
@@ -4142,6 +4183,51 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.to_string().contains("--name 不能为空"));
+    }
+
+    #[test]
+    fn add_jump_server_dry_run_does_not_write_config() {
+        let dir = tempdir().unwrap();
+        let cfg = dir.path().join("config.json");
+        let key = dir.path().join("k.pem");
+        write_test_private_key(&key);
+        run_add_jump_server(vec![
+            "--config".into(),
+            cfg.display().to_string(),
+            "--name".into(),
+            "prod.jumpserver".into(),
+            "--host".into(),
+            "1.2.3.4".into(),
+            "--username".into(),
+            "alice".into(),
+            "--private-key".into(),
+            key.display().to_string(),
+            "--dry-run".into(),
+        ])
+        .unwrap();
+        assert!(!cfg.exists());
+    }
+
+    #[test]
+    fn add_jump_server_rejects_unloadable_private_key() {
+        let dir = tempdir().unwrap();
+        let cfg = dir.path().join("config.json");
+        let key = dir.path().join("k.pem");
+        fs::write(&key, "not-a-private-key").unwrap();
+        let err = run_add_jump_server(vec![
+            "--config".into(),
+            cfg.display().to_string(),
+            "--name".into(),
+            "p".into(),
+            "--host".into(),
+            "1.1.1.1".into(),
+            "--username".into(),
+            "alice".into(),
+            "--private-key".into(),
+            key.display().to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("私钥无法被当前 SSH 栈加载"));
     }
 }
 

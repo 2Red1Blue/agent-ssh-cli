@@ -408,17 +408,18 @@ agentsshcli add-jump-server \
   --port <port> \
   --username <user> \
   --private-key <absolutePathToPem> \
-  [--force]
+  [--force] [--dry-run]
 ```
 
 参数：
 
 - `--name`：连接名（唯一），建议 `prod.jumpserver` / `test.jumpserver` 之类的命名
 - `--host`：JumpServer SSH 地址（IP 或域名）
-- `--port`：可选，默认 `22`；跳板机通常用自定义端口如 `8390` / `2222`
+- `--port`：可选，默认 `8390`；跳板机通常用自定义端口
 - `--username`：SSH 用户名
-- `--private-key`：私钥绝对路径，必须存在且可读，仅支持 PEM 格式
+- `--private-key`：私钥绝对路径，必须存在且可被当前 SSH 栈加载
 - `--force`：可选，同名连接已存在时覆盖（默认报错）
+- `--dry-run`：只预检参数，不写入配置
 - `--config <path>`：可选，覆盖默认配置路径
 
 自动写入的字段：
@@ -426,9 +427,9 @@ agentsshcli add-jump-server \
 - `pty: true`
 - `jumpServer.enabled: true`
 - `jumpServer.promptRegex: "Opt>\\s*$"`（标准 JumpServer 菜单 prompt）
-- `jumpServer.shellPromptRegex: "(?m)[#$>]\\s*$"`
+- `jumpServer.shellPromptRegex: "(?m)[#$]\\s*$"`
 - `jumpServer.searchPrefix: "/"`、`charDelayMs: 60`、`enterStrategy: "direct-then-search"`
-- 默认 `commandBlacklist`：`rm` / `truncate` / `reboot` / `shutdown` / `systemctl stop|restart|reload` / `kill` / `>` / `>>`
+- 默认 `commandBlacklist`：`rm` / `truncate` / `reboot` / `shutdown` / `systemctl stop|restart|reload` / `kill`
 
 返回值：
 
@@ -438,15 +439,27 @@ agentsshcli add-jump-server \
 
 ### AI 交互式收集参数流程（推荐）
 
-当用户说"加一个 JumpServer 跳板机"时，按顺序问 5 个问题，**每次只问一个**，最后一次性调用 `add-jump-server`：
+当用户说"加一个 JumpServer 跳板机"时，先做两步前置确认，再按顺序问 5 个问题，**每次只问一个**：
+
+前置确认：
+
+1. 是否使用私钥认证（不是密码认证）
+2. 私钥路径是否已经存在于本机
 
 1. 连接名（建议命名 `prod.jumpserver` / `test.jumpserver`，需唯一）
 2. JumpServer host（IP 或域名）
-3. SSH 端口（默认 22，确认是否需要自定义）
+3. SSH 端口（默认 8390，确认是否需要自定义）
 4. SSH 用户名
-5. 私钥绝对路径（PEM 格式）
+5. 私钥绝对路径
 
-收集完执行：
+收集完先预检：
+
+```bash
+agentsshcli add-jump-server --dry-run --name <name> --host <host> --port <port> \
+  --username <user> --private-key <key>
+```
+
+预检通过后正式执行：
 
 ```bash
 agentsshcli add-jump-server --name <name> --host <host> --port <port> \
@@ -457,13 +470,15 @@ agentsshcli add-jump-server --name <name> --host <host> --port <port> \
 
 ```bash
 agentsshcli list
+agentsshcli jump-menu <name>
+agentsshcli jump-search <name> "<业务简称或主机线索>"
 agentsshcli jump-exec <name> --target <已知目标主机> "hostname"
 ```
 
 ### 何时不用 add-jump-server
 
 - 用户已经有 `~/.agent-ssh-cli/config.json` 且包含同名连接，且**不想覆盖** → 直接告诉用户当前配置已存在
-- 用户使用密码或加密私钥认证 → `add-jump-server` 不支持，需手动编辑 JSON 并参考 README
+- 用户使用密码认证 → `add-jump-server` 不支持，需手动编辑 JSON 并参考 README
 - 用户需要自定义 `promptRegex` / `commandBlacklist` 等高级字段 → 先用 `add-jump-server` 生成基础结构，再手动修改对应字段
 
 ## 错误规则

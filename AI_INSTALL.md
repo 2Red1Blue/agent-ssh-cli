@@ -308,27 +308,30 @@ agentsshcli jump-exec --timeout 120000 <jumpserver-connection> --target <known-t
 
 ## 5. 首次安装后的个性化补充
 
-如果安装了 `log-analyze`，推荐在**首次安装完成后**由你当前正在使用的 AI 维护 `env-map.md`。用户通常只需要告诉 AI 三类信息：
+如果安装了 `log-analyze`，推荐在**首次安装完成后**由你当前正在使用的 AI 维护 `env-map.json`，再自动渲染 `env-map.md`。用户通常只需要告诉 AI 四类信息：
 
-1. 要添加哪些常用主机
-2. 这些主机或项目有哪些简称 / 别名
-3. 这些项目日志通常在哪个目录
+1. 有哪些 JumpServer，分别对应什么环境
+2. 各环境日志通常在哪个路径模式
+3. 最常查的项目和简称 / 别名
+4. 一组常用主机列表
 
-`env-map.md` 更适合作为 AI 的本地环境记忆，而不是要求用户长期手工编辑：
+`env-map.json` 更适合作为 AI 的结构化本地环境记忆，再自动渲染 `env-map.md` 供人类阅读，而不是要求用户长期手工编辑：
 
 - 用户提供事实信息
 - AI 负责 JumpServer 菜单确认、真实主机搜索、验证、写入和后续更新
 
 推荐 AI 先这样做：
 
-1. 先直接告诉用户“当前主链 env-map 文件路径”
-2. 先连接 JumpServer，执行 `agentsshcli jump-menu <jumpserver-connection>`，把当前 `Opt>` 菜单完整展示给用户
-3. 然后每次只问一个问题，但只围绕：
-   - 常用主机
-   - 主机/项目别名
-   - 日志目录
-4. 若用户给的是简称，先在 JumpServer 菜单层查出真实 hostname / IP
-5. 验证成功后，把真实 hostname / IP 写回 `env-map.md`
+1. 先直接告诉用户“当前主链 env-map.json / env-map.md 文件路径”
+2. 若 `env-map` 还不存在，再执行 `agentsshcli env-map init --from-config`，自动读取 `~/.agent-ssh-cli/config.json` 中的 JumpServer 连接；若已存在，就直接基于现有 `env-map.json` 增量维护
+3. 先连接 JumpServer，执行 `agentsshcli jump-menu <jumpserver-connection>`，把当前 `Opt>` 菜单完整展示给用户
+4. 然后每次只问一个问题，但只围绕四组信息：
+   - JumpServer 与环境对应关系
+   - 日志路径模式
+   - 项目简称 / 别名
+   - 常用主机列表
+5. 若用户给的是简称，先在 JumpServer 菜单层查出真实 hostname / IP
+6. 验证成功后，把真实 hostname / IP 写回结构化 `env-map.json`，再自动渲染 `env-map.md`
 
 如果需要完整示例流程，请阅读后续补充文档：
 
@@ -339,13 +342,13 @@ agentsshcli jump-exec --timeout 120000 <jumpserver-connection> --target <known-t
 1. 初始化 JumpServer 配置
 
 ```text
-请帮我初始化 agent-ssh-cli 的 JumpServer 配置。请按 README 里的 add-jump-server 流程每次只问我一个问题，收集完后执行 agentsshcli add-jump-server 写入 ~/.agent-ssh-cli/config.json。写入后先执行 agentsshcli jump-menu <jumpserver-connection>，把当前 JumpServer 的 Opt 菜单完整展示给我，确认这个跳板机怎么列主机、怎么搜索主机；然后再做最小验证。
+请帮我初始化 agent-ssh-cli 的 JumpServer 配置。先确认我是否使用私钥认证、私钥路径是否真实存在，再按 README 里的 add-jump-server 流程每次只问我一个问题收集 name、host、port、username、private-key。正式写入前先执行 agentsshcli add-jump-server --dry-run 做预检，通过后再写入 ~/.agent-ssh-cli/config.json。写入后先执行 agentsshcli jump-menu <jumpserver-connection>，把当前 JumpServer 的 Opt 菜单完整展示给我，确认这个跳板机怎么列主机、怎么搜索主机；然后再做最小验证。
 ```
 
 2. 初始化 log-analyze 映射
 
 ```text
-请帮我初始化 log-analyze。第一步先连接 JumpServer，执行 agentsshcli jump-menu <jumpserver-connection>，把当前 JumpServer 的 Opt 菜单完整展示给我。确认完菜单后，再用一句话说明这一步是在补“常用主机、主机/项目别名、日志目录”的私有信息，后面查日志时你才能自动定位。然后每次只问我一个问题，但只需要向我收集三类信息：1. 我想添加哪些常用主机；2. 这些主机或项目平时有哪些简称 / 别名；3. 这些项目日志通常在哪个目录。JumpServer 菜单确认、主机搜索、真实 hostname / IP 验证、以及写回当前主链客户端的 log-analyze/env-map.md 这些动作都由你自己完成；不要一开始就要求我提供完整 hostname。如果我给的是简称，先在 JumpServer 菜单层查出真实 hostname / IP，再回显给我并写入映射，然后继续补日志路径，直到客户端里可以正常使用 log-analyze。
+请帮我初始化 log-analyze。先检查当前主链的 log-analyze/env-map.json 和 env-map.md 是否已经存在：如果还不存在，再执行 agentsshcli env-map init --from-config，自动读取 ~/.agent-ssh-cli/config.json 中已有的 JumpServer 连接；如果已经存在，就直接基于现有 env-map.json 增量维护，不要重复 init，只有确认整体重建时才使用 --force。然后第一步再连接 JumpServer，执行 agentsshcli jump-menu <jumpserver-connection>，把当前 JumpServer 的 Opt 菜单完整展示给我。确认完菜单后，再用一句话说明这一步是在补“常用主机、主机/项目别名、日志目录”的私有信息，后面查日志时你才能自动定位。然后不要按 14 个问题逐条追问，而是每次只问我一个问题，但只收集四组信息：1. 有哪些 JumpServer 分别对应什么环境；2. 各环境日志在哪个路径模式；3. 最常查的项目和简称；4. 一组常用主机列表。JumpServer 菜单确认、主机搜索、真实 hostname / IP 验证、以及写回当前主链客户端的 log-analyze/env-map.json / env-map.md 这些动作都由你自己完成；不要一开始就要求我提供完整 hostname。如果我给的是简称，先在 JumpServer 菜单层查出真实 hostname / IP，再回显给我并写入映射，然后继续补日志路径，直到客户端里可以正常使用 log-analyze。
 ```
 
 如果后续你更新了 `log-analyze` 的工作流模板，也要同步覆盖本地安装目录中的：
@@ -361,7 +364,7 @@ agentsshcli jump-exec --timeout 120000 <jumpserver-connection> --target <known-t
 - 通用规则升级：覆盖 `SKILL.md`
 - 私有环境变化：更新 `env-map.md`
 
-从 `0.1.4` 开始，更推荐用下面这组命令先检查再兼容更新：
+从 `0.1.5` 开始，更推荐用下面这组命令先检查再兼容更新：
 
 ```bash
 agentsshcli doctor-skills

@@ -15,10 +15,56 @@ const homeDir = os.homedir();
 const packageVersion = require(path.join(projectRoot, "package.json")).version;
 const ccSwitchSkillsDir = path.join(homeDir, ".cc-switch", "skills");
 const LOG_SKILL_NAME = "log-analyze";
+const ENV_MAP_JSON_FILENAME = "env-map.json";
+const ENV_MAP_MD_FILENAME = "env-map.md";
+const DEFAULT_CONFIG_PATH = path.join(homeDir, ".agent-ssh-cli", "config.json");
+const ENV_MAP_SCHEMA_VERSION = 1;
 const MANAGED_START_MARKER = "<!-- agentsshcli:managed:start -->";
 const MANAGED_END_MARKER = "<!-- agentsshcli:managed:end -->";
 const LOCAL_START_MARKER = "<!-- agentsshcli:local:start -->";
 const LOCAL_END_MARKER = "<!-- agentsshcli:local:end -->";
+const INSTALL_PRESETS = {
+  codex: {
+    clients: ["codex"],
+    primaryClient: "codex",
+    linkSecondary: true
+  },
+  claude: {
+    clients: ["claude"],
+    primaryClient: "claude",
+    linkSecondary: true
+  },
+  hermes: {
+    clients: ["hermes"],
+    primaryClient: "hermes",
+    linkSecondary: true
+  },
+  opencode: {
+    clients: ["opencode"],
+    primaryClient: "opencode",
+    linkSecondary: true
+  },
+  "cc-switch": {
+    clients: ["cc-switch"],
+    primaryClient: "cc-switch",
+    linkSecondary: true
+  },
+  "cc-switch-codex": {
+    clients: ["cc-switch", "codex"],
+    primaryClient: "cc-switch",
+    linkSecondary: true
+  },
+  "cc-switch-claude": {
+    clients: ["cc-switch", "claude"],
+    primaryClient: "cc-switch",
+    linkSecondary: true
+  },
+  "cc-switch-hermes": {
+    clients: ["cc-switch", "hermes"],
+    primaryClient: "cc-switch",
+    linkSecondary: true
+  }
+};
 const KNOWN_CLIENTS = {
   "cc-switch": {
     label: "CC Switch",
@@ -153,8 +199,379 @@ function normalizeNewlines(value) {
   return String(value || "").replace(/\r\n?/g, "\n");
 }
 
+function readJsonFile(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function writePrettyJson(targetPath, value) {
+  fs.writeFileSync(targetPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
 function computeSha256(value) {
   return crypto.createHash("sha256").update(normalizeNewlines(value), "utf8").digest("hex");
+}
+
+function normalizeStringArray(values) {
+  return unique(
+    (Array.isArray(values) ? values : [])
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+  );
+}
+
+function inferEnvironmentFromConnectionName(connectionName) {
+  const normalized = String(connectionName || "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.startsWith("prod") || normalized.includes(".prod")) {
+    return "prod";
+  }
+  if (
+    normalized.startsWith("yfb") ||
+    normalized.startsWith("pre") ||
+    normalized.includes("preprod") ||
+    normalized.includes("staging")
+  ) {
+    return "yfb";
+  }
+  if (normalized.startsWith("test") || normalized.includes(".test") || normalized.includes("qa")) {
+    return "test";
+  }
+  return "";
+}
+
+function getDefaultEnvironmentAliases(environmentName) {
+  switch (environmentName) {
+    case "prod":
+      return ["线上", "生产", "prod"];
+    case "yfb":
+      return ["预发", "yfb"];
+    case "test":
+      return ["测试", "test"];
+    default:
+      return [environmentName].filter(Boolean);
+  }
+}
+
+function getDefaultJumpServerAliases(environmentName) {
+  switch (environmentName) {
+    case "prod":
+      return ["线上跳板机", "生产跳板机"];
+    case "yfb":
+      return ["预发跳板机"];
+    case "test":
+      return ["测试跳板机"];
+    default:
+      return [];
+  }
+}
+
+function defaultLogPathPattern(environmentName) {
+  switch (environmentName) {
+    case "prod":
+    case "yfb":
+      return "/www/{project}/logs";
+    case "test":
+      return "/data/{project}/logs";
+    default:
+      return "";
+  }
+}
+
+function buildEmptyEnvMapData() {
+  return {
+    schemaVersion: ENV_MAP_SCHEMA_VERSION,
+    generatedBy: "agentsshcli",
+    updatedAt: new Date().toISOString(),
+    jumpServers: [],
+    environments: {
+      prod: {
+        jumpServer: "",
+        targetPreference: "hostname",
+        logPathPattern: "",
+        aliases: getDefaultEnvironmentAliases("prod")
+      },
+      yfb: {
+        jumpServer: "",
+        targetPreference: "hostname",
+        logPathPattern: "",
+        aliases: getDefaultEnvironmentAliases("yfb")
+      },
+      test: {
+        jumpServer: "",
+        targetPreference: "hostname",
+        logPathPattern: "",
+        aliases: getDefaultEnvironmentAliases("test")
+      }
+    },
+    defaultEnvironment: "prod",
+    projects: [],
+    machineShortcuts: {},
+    logRotationNotes: []
+  };
+}
+
+function readConnectionEntries(configPath) {
+  if (!fs.existsSync(configPath)) {
+    return [];
+  }
+  const raw = fs.readFileSync(configPath, "utf8").trim();
+  if (!raw) {
+    return [];
+  }
+  const parsed = JSON.parse(raw);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function buildEnvMapFromConnections(configEntries) {
+  const base = buildEmptyEnvMapData();
+  const jumpServers = configEntries
+    .filter((entry) => entry?.jumpServer?.enabled === true && entry?.name)
+    .map((entry) => {
+      const environment = inferEnvironmentFromConnectionName(entry.name);
+      return {
+        name: entry.name,
+        environment,
+        aliases: getDefaultJumpServerAliases(environment)
+      };
+    });
+
+  base.jumpServers = jumpServers;
+  for (const server of jumpServers) {
+    if (!server.environment) {
+      continue;
+    }
+    const current = base.environments[server.environment] || {
+      jumpServer: "",
+      targetPreference: "hostname",
+      logPathPattern: "",
+      aliases: getDefaultEnvironmentAliases(server.environment)
+    };
+    base.environments[server.environment] = {
+      ...current,
+      jumpServer: current.jumpServer || server.name,
+      logPathPattern: current.logPathPattern || defaultLogPathPattern(server.environment)
+    };
+  }
+  if (!base.environments.prod.jumpServer) {
+    const first = jumpServers[0];
+    if (first) {
+      base.environments.prod.jumpServer = first.name;
+    }
+  }
+  return base;
+}
+
+function normalizeProjectEntry(project, index, validEnvironments) {
+  const name = String(project?.name || "").trim();
+  if (!name) {
+    throw new Error(`projects[${index}].name 不能为空`);
+  }
+  const aliases = normalizeStringArray(project.aliases);
+  const targets = {};
+  for (const [environmentName, values] of Object.entries(project.targets || {})) {
+    if (!validEnvironments.has(environmentName)) {
+      throw new Error(`projects[${index}].targets.${environmentName} 不是已知环境`);
+    }
+    targets[environmentName] = normalizeStringArray(values);
+  }
+  return { name, aliases, targets };
+}
+
+function normalizeEnvMapData(rawData) {
+  const base = buildEmptyEnvMapData();
+  const data = rawData && typeof rawData === "object" ? rawData : {};
+  const environmentNames = unique([
+    ...Object.keys(base.environments),
+    ...Object.keys(data.environments || {})
+  ]);
+  const environments = {};
+  for (const environmentName of environmentNames) {
+    const source = data.environments?.[environmentName] || {};
+    environments[environmentName] = {
+      jumpServer: String(source.jumpServer || "").trim(),
+      targetPreference: ["hostname", "ip"].includes(source.targetPreference) ? source.targetPreference : "hostname",
+      logPathPattern: String(source.logPathPattern || "").trim(),
+      aliases: normalizeStringArray(source.aliases?.length ? source.aliases : getDefaultEnvironmentAliases(environmentName))
+    };
+  }
+
+  const validEnvironments = new Set(Object.keys(environments));
+  const jumpServers = (Array.isArray(data.jumpServers) ? data.jumpServers : []).map((item, index) => {
+    const name = String(item?.name || "").trim();
+    if (!name) {
+      throw new Error(`jumpServers[${index}].name 不能为空`);
+    }
+    const environment = String(item?.environment || "").trim();
+    if (environment && !validEnvironments.has(environment)) {
+      throw new Error(`jumpServers[${index}].environment=${environment} 不是已知环境`);
+    }
+    return {
+      name,
+      environment,
+      aliases: normalizeStringArray(item.aliases)
+    };
+  });
+
+  const jumpServerNames = new Set(jumpServers.map((item) => item.name));
+  for (const [environmentName, environment] of Object.entries(environments)) {
+    if (environment.jumpServer && !jumpServerNames.has(environment.jumpServer)) {
+      throw new Error(`environments.${environmentName}.jumpServer=${environment.jumpServer} 在 jumpServers 中不存在`);
+    }
+  }
+
+  const projects = (Array.isArray(data.projects) ? data.projects : []).map((item, index) =>
+    normalizeProjectEntry(item, index, validEnvironments)
+  );
+
+  const machineShortcuts = {};
+  for (const [shortcut, target] of Object.entries(data.machineShortcuts || {})) {
+    const normalizedShortcut = String(shortcut || "").trim();
+    const normalizedTarget = String(target || "").trim();
+    if (!normalizedShortcut || !normalizedTarget) {
+      throw new Error("machineShortcuts 里的 key/value 都必须是非空字符串");
+    }
+    machineShortcuts[normalizedShortcut] = normalizedTarget;
+  }
+
+  return {
+    schemaVersion: Number.isFinite(Number(data.schemaVersion)) ? Number(data.schemaVersion) : ENV_MAP_SCHEMA_VERSION,
+    generatedBy: "agentsshcli",
+    updatedAt: new Date().toISOString(),
+    jumpServers,
+    environments,
+    defaultEnvironment: validEnvironments.has(data.defaultEnvironment) ? data.defaultEnvironment : "prod",
+    projects,
+    machineShortcuts,
+    logRotationNotes: normalizeStringArray(data.logRotationNotes)
+  };
+}
+
+function renderEnvMapMarkdown(data) {
+  const lines = [
+    "# log-analyze Environment Map",
+    "",
+    "> 这个文件由 `env-map.json` 渲染生成，供人类阅读与 AI 快速核对。",
+    "> 结构化数据请维护同目录下的 `env-map.json`，再执行 `agentsshcli env-map render`。",
+    ""
+  ];
+
+  lines.push("## JumpServer Connections", "");
+  if (data.jumpServers.length === 0) {
+    lines.push("- 暂无已登记 JumpServer 连接");
+  } else {
+    for (const server of data.jumpServers) {
+      const aliases = server.aliases.length > 0 ? `；别名：${server.aliases.join(" / ")}` : "";
+      const environment = server.environment ? `；环境：${server.environment}` : "";
+      lines.push(`- \`${server.name}\`${environment}${aliases}`);
+    }
+  }
+  lines.push("");
+
+  lines.push("## Environments", "");
+  for (const [environmentName, environment] of Object.entries(data.environments)) {
+    lines.push(`- \`${environmentName}\``);
+    lines.push(`  - JumpServer: ${environment.jumpServer ? `\`${environment.jumpServer}\`` : "待补充"}`);
+    lines.push(`  - target 偏好: \`${environment.targetPreference}\``);
+    lines.push(`  - 日志路径模式: ${environment.logPathPattern ? `\`${environment.logPathPattern}\`` : "待补充"}`);
+    lines.push(`  - 别名: ${environment.aliases.length > 0 ? environment.aliases.join(" / ") : "待补充"}`);
+  }
+  lines.push("");
+
+  lines.push("## Projects", "");
+  if (data.projects.length === 0) {
+    lines.push("- 暂无项目映射");
+  } else {
+    for (const project of data.projects) {
+      lines.push(`- \`${project.name}\`${project.aliases.length > 0 ? `；别名：${project.aliases.join(" / ")}` : ""}`);
+      for (const [environmentName, targets] of Object.entries(project.targets)) {
+        lines.push(`  - ${environmentName}: ${targets.length > 0 ? targets.map((item) => `\`${item}\``).join(", ") : "待补充"}`);
+      }
+    }
+  }
+  lines.push("");
+
+  lines.push("## Machine Shortcuts", "");
+  const shortcutEntries = Object.entries(data.machineShortcuts);
+  if (shortcutEntries.length === 0) {
+    lines.push("- 暂无机器简称映射");
+  } else {
+    for (const [shortcut, target] of shortcutEntries) {
+      lines.push(`- \`${shortcut}\` -> \`${target}\``);
+    }
+  }
+  lines.push("");
+
+  lines.push("## Log Rotation Notes", "");
+  if (data.logRotationNotes.length === 0) {
+    lines.push("- 暂无特殊日志归档说明");
+  } else {
+    for (const note of data.logRotationNotes) {
+      lines.push(`- ${note}`);
+    }
+  }
+  lines.push("");
+  lines.push(`_defaultEnvironment: \`${data.defaultEnvironment}\`_`);
+  lines.push(`_updatedAt: ${data.updatedAt}_`);
+  lines.push("");
+  return `${lines.join("\n")}\n`;
+}
+
+function getEnvMapPaths(target) {
+  const logSkillDir = path.join(target.skillsDir, LOG_SKILL_NAME);
+  return {
+    logSkillDir,
+    jsonPath: path.join(logSkillDir, ENV_MAP_JSON_FILENAME),
+    markdownPath: path.join(logSkillDir, ENV_MAP_MD_FILENAME),
+    templatePath: path.join(logSkillDir, "env-map.template.md")
+  };
+}
+
+function writeEnvMapData(target, data) {
+  const paths = getEnvMapPaths(target);
+  ensureDir(paths.logSkillDir);
+  writePrettyJson(paths.jsonPath, data);
+  fs.writeFileSync(paths.markdownPath, renderEnvMapMarkdown(data), "utf8");
+  return paths;
+}
+
+function getExistingEnvMapFiles(paths) {
+  const existing = [];
+  if (fs.existsSync(paths.jsonPath)) {
+    existing.push(paths.jsonPath);
+  }
+  if (fs.existsSync(paths.markdownPath)) {
+    existing.push(paths.markdownPath);
+  }
+  return existing;
+}
+
+function ensureEnvMapFiles(target) {
+  const paths = getEnvMapPaths(target);
+  ensureDir(paths.logSkillDir);
+  const templateSource = path.join(projectRoot, "skills", LOG_SKILL_NAME, "env-map.template.md");
+  const templateCreated = writeFileIfMissing(templateSource, paths.templatePath);
+  let jsonCreated = false;
+  let markdownCreated = false;
+  if (!fs.existsSync(paths.jsonPath)) {
+    writePrettyJson(paths.jsonPath, buildEmptyEnvMapData());
+    jsonCreated = true;
+  }
+  const data = normalizeEnvMapData(readJsonFile(paths.jsonPath));
+  if (jsonCreated) {
+    writePrettyJson(paths.jsonPath, data);
+  }
+  if (!fs.existsSync(paths.markdownPath)) {
+    fs.writeFileSync(paths.markdownPath, renderEnvMapMarkdown(data), "utf8");
+    markdownCreated = true;
+  }
+  return {
+    ...paths,
+    jsonCreated,
+    markdownCreated,
+    templateCreated
+  };
 }
 
 function compareSemver(left, right) {
@@ -504,15 +921,9 @@ async function promptCompatUpdate(inspection) {
 async function syncSingleLogSkill(target, options = {}) {
   const packagedTemplate = getPackagedLogSkillTemplate();
   const inspection = inspectLogSkill(target, packagedTemplate);
-  const logSkillDir = path.join(target.skillsDir, LOG_SKILL_NAME);
+  const { logSkillDir, templateCreated: envTemplateCreated, jsonCreated, markdownCreated } = ensureEnvMapFiles(target);
   const skillFile = path.join(logSkillDir, "SKILL.md");
-  const envTemplateTarget = path.join(logSkillDir, "env-map.template.md");
-  const envMapTarget = path.join(logSkillDir, "env-map.md");
-  const envTemplateSource = path.join(projectRoot, "skills", LOG_SKILL_NAME, "env-map.template.md");
-
-  ensureDir(logSkillDir);
-  const envTemplateCreated = writeFileIfMissing(envTemplateSource, envTemplateTarget);
-  const envCreated = writeFileIfMissing(envTemplateSource, envMapTarget);
+  const envCreated = jsonCreated || markdownCreated;
 
   if (!inspection.exists) {
     fs.writeFileSync(skillFile, buildManagedSkillDocument(packagedTemplate, packagedTemplate.localContent), "utf8");
@@ -694,6 +1105,338 @@ function printSyncSkillsHelp() {
 `);
 }
 
+function parseEnvMapCommandArgs(args) {
+  const parsed = {
+    subcommand: "",
+    skillsDir: "",
+    explicitClients: [],
+    clientRoots: new Map(),
+    configPath: DEFAULT_CONFIG_PATH,
+    fromConfig: false,
+    json: false,
+    environment: "",
+    project: "",
+    alias: [],
+    target: [],
+    shortcut: [],
+    logPathPattern: "",
+    jumpServer: "",
+    defaultEnvironment: "",
+    note: [],
+    force: false,
+    help: false
+  };
+
+  if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
+    parsed.help = true;
+    return parsed;
+  }
+
+  parsed.subcommand = args[0];
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--help" || arg === "-h") {
+      parsed.help = true;
+      continue;
+    }
+    if (arg === "--skills-dir") {
+      parsed.skillsDir = expandHome(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (arg === "--client") {
+      const clientName = normalizeClientName(args[index + 1]);
+      if (!clientName) {
+        throw new Error(`未知客户端: ${args[index + 1]}`);
+      }
+      parsed.explicitClients.push(clientName);
+      index += 1;
+      continue;
+    }
+    if (arg === "--clients") {
+      parsed.explicitClients.push(...parseClientList(args[index + 1]));
+      index += 1;
+      continue;
+    }
+    if (arg === "--client-root") {
+      const clientRoot = parseClientRootArg(args[index + 1]);
+      parsed.clientRoots.set(clientRoot.clientName, clientRoot.skillsDir);
+      index += 1;
+      continue;
+    }
+    if (arg === "--config" || arg === "--config-path") {
+      parsed.configPath = expandHome(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (arg === "--from-config") {
+      parsed.fromConfig = true;
+      continue;
+    }
+    if (arg === "--force") {
+      parsed.force = true;
+      continue;
+    }
+    if (arg === "--json") {
+      parsed.json = true;
+      continue;
+    }
+    if (arg === "--env" || arg === "--environment") {
+      parsed.environment = String(args[index + 1] || "").trim();
+      index += 1;
+      continue;
+    }
+    if (arg === "--project") {
+      parsed.project = String(args[index + 1] || "").trim();
+      index += 1;
+      continue;
+    }
+    if (arg === "--alias") {
+      parsed.alias.push(String(args[index + 1] || "").trim());
+      index += 1;
+      continue;
+    }
+    if (arg === "--target") {
+      parsed.target.push(String(args[index + 1] || "").trim());
+      index += 1;
+      continue;
+    }
+    if (arg === "--shortcut") {
+      parsed.shortcut.push(String(args[index + 1] || "").trim());
+      index += 1;
+      continue;
+    }
+    if (arg === "--log-path" || arg === "--log-path-pattern") {
+      parsed.logPathPattern = String(args[index + 1] || "").trim();
+      index += 1;
+      continue;
+    }
+    if (arg === "--jump-server") {
+      parsed.jumpServer = String(args[index + 1] || "").trim();
+      index += 1;
+      continue;
+    }
+    if (arg === "--default-env") {
+      parsed.defaultEnvironment = String(args[index + 1] || "").trim();
+      index += 1;
+      continue;
+    }
+    if (arg === "--note") {
+      parsed.note.push(String(args[index + 1] || "").trim());
+      index += 1;
+      continue;
+    }
+    throw new Error(`未知参数: ${arg}`);
+  }
+
+  return parsed;
+}
+
+function printEnvMapHelp() {
+  console.log(`用法:
+  agentsshcli env-map init [--skills-dir <path>|--client <name>|--clients <list>] [--client-root <name=path> ...] [--from-config] [--config <path>] [--force]
+  agentsshcli env-map render [--skills-dir <path>|--client <name>|--clients <list>] [--client-root <name=path> ...]
+  agentsshcli env-map list [--skills-dir <path>|--client <name>|--clients <list>] [--client-root <name=path> ...] [--json]
+  agentsshcli env-map status [--skills-dir <path>|--client <name>|--clients <list>] [--client-root <name=path> ...] [--json]
+  agentsshcli env-map validate [--skills-dir <path>|--client <name>|--clients <list>] [--client-root <name=path> ...] [--json]
+  agentsshcli env-map add-host --project <name> --env <env> --target <hostOrIp> [--alias <alias> ...] [--shortcut <shortcut=hostOrIp> ...] [--skills-dir <path>|--client <name>|--clients <list>] [--client-root <name=path> ...]
+
+说明:
+  使用结构化的 env-map.json 维护 JumpServer、环境、项目别名、目标机和日志路径，再自动渲染 env-map.md 供人类阅读。
+  首次创建时推荐执行 \`agentsshcli env-map init --from-config\`，自动从 ~/.agent-ssh-cli/config.json 发现 JumpServer 连接。
+  为避免误覆盖，\`env-map init\` 在检测到现有 env-map.json 或 env-map.md 时默认拒绝重写；如需整体重建请显式加 \`--force\`。
+`);
+}
+
+function resolveSingleEnvMapTarget(parsed) {
+  const targets = resolveSelectedTargets({
+    skillsDir: parsed.skillsDir,
+    explicitClients: parsed.explicitClients,
+    clientRoots: parsed.clientRoots
+  });
+  return targets[0];
+}
+
+function loadEnvMapData(target) {
+  const ensured = ensureEnvMapFiles(target);
+  const data = normalizeEnvMapData(readJsonFile(ensured.jsonPath));
+  return {
+    target,
+    paths: ensured,
+    data
+  };
+}
+
+function validateEnvMapData(data) {
+  const issues = [];
+  if (data.jumpServers.length === 0) {
+    issues.push("未登记任何 JumpServer 连接");
+  }
+  for (const [environmentName, environment] of Object.entries(data.environments)) {
+    if (!environment.jumpServer) {
+      issues.push(`环境 ${environmentName} 未绑定 JumpServer`);
+    }
+    if (!environment.logPathPattern) {
+      issues.push(`环境 ${environmentName} 未配置日志路径模式`);
+    }
+  }
+  if (!data.defaultEnvironment || !data.environments[data.defaultEnvironment]) {
+    issues.push("defaultEnvironment 无效");
+  }
+  return issues;
+}
+
+function summarizeEnvMapStatus(data, issues) {
+  return {
+    jumpServers: data.jumpServers.map((item) => item.name),
+    environments: Object.keys(data.environments),
+    projects: data.projects.map((item) => item.name),
+    machineShortcuts: Object.keys(data.machineShortcuts),
+    issues
+  };
+}
+
+function upsertProject(data, projectName) {
+  const normalizedProjectName = String(projectName || "").trim();
+  if (!normalizedProjectName) {
+    throw new Error("--project 不能为空");
+  }
+  const existing = data.projects.find((item) => item.name === normalizedProjectName);
+  if (existing) {
+    return existing;
+  }
+  const next = {
+    name: normalizedProjectName,
+    aliases: [],
+    targets: {}
+  };
+  data.projects.push(next);
+  return next;
+}
+
+function parseShortcutAssignments(items) {
+  const assignments = [];
+  for (const raw of items) {
+    const value = String(raw || "").trim();
+    if (!value) {
+      continue;
+    }
+    const index = value.indexOf("=");
+    if (index <= 0 || index === value.length - 1) {
+      throw new Error(`--shortcut 参数格式必须是 <alias>=<target>，实际收到: ${value}`);
+    }
+    assignments.push({
+      alias: value.slice(0, index).trim(),
+      target: value.slice(index + 1).trim()
+    });
+  }
+  return assignments;
+}
+
+async function runEnvMap(args) {
+  const parsed = parseEnvMapCommandArgs(args);
+  if (parsed.help) {
+    printEnvMapHelp();
+    return 0;
+  }
+
+  if (!parsed.subcommand) {
+    printEnvMapHelp();
+    return 1;
+  }
+
+  const target = resolveSingleEnvMapTarget(parsed);
+
+  if (parsed.subcommand === "init") {
+    const paths = getEnvMapPaths(target);
+    ensureDir(paths.logSkillDir);
+    const templateSource = path.join(projectRoot, "skills", LOG_SKILL_NAME, "env-map.template.md");
+    writeFileIfMissing(templateSource, paths.templatePath);
+    const existingEnvMapFiles = getExistingEnvMapFiles(paths);
+    if (existingEnvMapFiles.length > 0 && !parsed.force) {
+      throw new Error(
+        `已存在 env-map 文件：${existingEnvMapFiles.join("、")}。为避免覆盖已有映射，默认拒绝重建；如确认要整体重建，请显式加 --force。`
+      );
+    }
+    let data = buildEmptyEnvMapData();
+    if (parsed.fromConfig) {
+      data = buildEnvMapFromConnections(readConnectionEntries(parsed.configPath));
+    }
+    const writtenPaths = writeEnvMapData(target, normalizeEnvMapData(data));
+    console.log(`已初始化 env-map: ${writtenPaths.jsonPath}`);
+    console.log(`已渲染 env-map: ${writtenPaths.markdownPath}`);
+    if (parsed.fromConfig) {
+      console.log(`已从 ${parsed.configPath} 自动发现 ${data.jumpServers.length} 个 JumpServer 连接`);
+    }
+    return 0;
+  }
+
+  const loaded = loadEnvMapData(target);
+
+  if (parsed.subcommand === "render") {
+    writeEnvMapData(target, loaded.data);
+    console.log(`已重新渲染 ${loaded.paths.markdownPath}`);
+    return 0;
+  }
+
+  if (parsed.subcommand === "list") {
+    if (parsed.json) {
+      console.log(JSON.stringify(loaded.data, null, 2));
+    } else {
+      console.log(renderEnvMapMarkdown(loaded.data).trimEnd());
+    }
+    return 0;
+  }
+
+  if (parsed.subcommand === "status" || parsed.subcommand === "validate") {
+    const issues = validateEnvMapData(loaded.data);
+    const summary = summarizeEnvMapStatus(loaded.data, issues);
+    if (parsed.json) {
+      console.log(JSON.stringify(summary, null, 2));
+    } else {
+      console.log(`JumpServer: ${summary.jumpServers.length}`);
+      console.log(`环境: ${summary.environments.join(", ")}`);
+      console.log(`项目: ${summary.projects.length}`);
+      console.log(`机器简称: ${summary.machineShortcuts.length}`);
+      if (issues.length === 0) {
+        console.log("状态: 已通过基本校验");
+      } else {
+        console.log("状态: 仍有待补项");
+        for (const issue of issues) {
+          console.log(`- ${issue}`);
+        }
+      }
+    }
+    return issues.length === 0 ? 0 : 2;
+  }
+
+  if (parsed.subcommand === "add-host") {
+    if (!parsed.environment) {
+      throw new Error("add-host 需要 --env <environment>");
+    }
+    if (!loaded.data.environments[parsed.environment]) {
+      throw new Error(`未知环境: ${parsed.environment}`);
+    }
+    if (parsed.target.length === 0) {
+      throw new Error("add-host 至少需要一个 --target <hostOrIp>");
+    }
+    const project = upsertProject(loaded.data, parsed.project);
+    project.aliases = unique([...project.aliases, ...normalizeStringArray(parsed.alias)]);
+    project.targets[parsed.environment] = unique([
+      ...(project.targets[parsed.environment] || []),
+      ...normalizeStringArray(parsed.target)
+    ]);
+    for (const assignment of parseShortcutAssignments(parsed.shortcut)) {
+      loaded.data.machineShortcuts[assignment.alias] = assignment.target;
+    }
+    writeEnvMapData(target, normalizeEnvMapData(loaded.data));
+    console.log(`已更新项目 ${project.name} 的 ${parsed.environment} 目标机映射`);
+    return 0;
+  }
+
+  throw new Error(`未知 env-map 子命令: ${parsed.subcommand}`);
+}
+
 function formatDoctorSummary(inspection) {
   if (inspection.status === "missing") {
     return "未安装";
@@ -829,7 +1572,8 @@ function ensureDirSymlink(sourceDir, targetDir) {
 async function installPrimarySkills(skillsDir, sources, options = {}) {
   const agentSkillDir = path.join(skillsDir, "agent-ssh-cli");
   const logSkillDir = path.join(skillsDir, "log-analyze");
-  const envMapTarget = path.join(logSkillDir, "env-map.md");
+  const envMapTarget = path.join(logSkillDir, ENV_MAP_MD_FILENAME);
+  const envMapJsonTarget = path.join(logSkillDir, ENV_MAP_JSON_FILENAME);
 
   const agentSkillTarget = installSingleSkillFile(sources.agentSkillSource, agentSkillDir);
   const logSkillResult = await syncSingleLogSkill({
@@ -843,6 +1587,7 @@ async function installPrimarySkills(skillsDir, sources, options = {}) {
     agentSkillTarget,
     logSkillDir,
     envMapTarget,
+    envMapJsonTarget,
     envCreated: logSkillResult.envCreated,
     logSkillResult
   };
@@ -931,6 +1676,7 @@ async function promptInstallPlan(defaultClients, clientRoots) {
 function printInstallAiHelp() {
   console.log(`用法:
   agentsshcli install-ai [--skills-dir <path>] [--config-dir <path>]
+  agentsshcli install-ai [--preset <name>] [--config-dir <path>]
   agentsshcli install-ai [--interactive] [--clients <list>] [--primary-client <name>] [--copy-secondary]
   agentsshcli install-ai [--interactive] [--client <name> ...] [--client-root <name=path> ...]
 
@@ -952,6 +1698,7 @@ function printInstallAiHelp() {
 参数:
   --skills-dir <path>         指定单个 skills 根目录，兼容旧行为
   --config-dir <path>         指定配置目录，默认 ~/.agent-ssh-cli
+  --preset <name>             使用预设客户端组合，例如 codex / hermes / cc-switch-codex
   --interactive, -i           交互式选择客户端、主链客户端和复用方式
   --client <name>             追加一个客户端（可重复）
   --clients <a,b,c>           批量指定客户端
@@ -982,16 +1729,20 @@ function printNextSteps({ selectedTargets, primaryTarget, envMapTarget, configTa
   console.log("   - 先执行: agentsshcli jump-menu <jumpserver-connection>");
   console.log("   - 先确认当前跳板机菜单长什么样、怎么列主机、怎么搜索主机");
   console.log("4. 然后你只需要告诉 AI 这些信息：");
-  console.log("   - 你想添加哪些常用主机");
-  console.log("   - 这些主机或项目平时有哪些简称 / 别名");
-  console.log("   - 这些项目的日志通常在哪个目录");
+  console.log("   - 有哪些 JumpServer 分别对应什么环境");
+  console.log("   - 各环境日志通常在哪个路径模式");
+  console.log("   - 最常查的项目与简称 / 别名");
+  console.log("   - 一组常用主机列表");
   console.log("   - 剩下的 JumpServer 菜单确认、主机搜索、真实 hostname/IP 回填，都应由 AI 完成");
-  console.log("5. 再初始化 log-analyze 的私有环境映射：");
+  console.log("5. 再维护 log-analyze 的私有环境映射：");
   console.log(`   - 主链 env-map: ${envMapTarget}`);
+  console.log(`   - 结构化源文件: ${envMapTarget.replace(/env-map\.md$/, ENV_MAP_JSON_FILENAME)}`);
   console.log(`   - 其他客户端${linkSecondary ? "会通过软链复用这份 env-map" : "各自保留本地 env-map"}`);
   console.log("   - 这个文件建议由你当前正在使用的 AI 自行维护");
-  console.log("   - 你通常只需要告诉 AI：常用主机、别名、日志目录");
+  console.log("   - 你通常只需要告诉 AI：JumpServer 与环境关系、日志路径模式、项目别名、常用主机列表");
   console.log("   - 下面有可直接复制给 AI 的提示词");
+  console.log("   - 若 env-map 尚不存在，再执行: agentsshcli env-map init --from-config");
+  console.log("   - 若已存在，就直接在现有 env-map.json 基础上补充；只有整体重建时才使用 --force");
   console.log("6. 做最小验证：");
   console.log("   - agentsshcli list");
   console.log("   - agentsshcli jump-menu <jumpserver-connection>");
@@ -1001,10 +1752,10 @@ function printNextSteps({ selectedTargets, primaryTarget, envMapTarget, configTa
   console.log("推荐交给 AI 的标准提示词：");
   console.log("");
   console.log("A. 初始化 JumpServer 配置");
-  console.log(`请帮我初始化 agent-ssh-cli 的 JumpServer 配置。请按 README 里的 add-jump-server 流程每次只问我一个问题，收集完后执行 agentsshcli add-jump-server 写入 ${configTarget}。写入后先执行 agentsshcli jump-menu <jumpserver-connection>，把当前 JumpServer 的 Opt 菜单完整展示给我并确认这个跳板机怎么列主机、怎么搜索主机；这些确认完成后，再继续后面的最小验证。`);
+  console.log(`请帮我初始化 agent-ssh-cli 的 JumpServer 配置。先确认我是否使用私钥认证、私钥路径是否真实存在，再继续收集 name、host、port、username、private-key。正式写入前先用 agentsshcli add-jump-server --dry-run 做预检，确认通过后再写入 ${configTarget}。写入后先执行 agentsshcli jump-menu <jumpserver-connection>，把当前 JumpServer 的 Opt 菜单完整展示给我并确认这个跳板机怎么列主机、怎么搜索主机；这些确认完成后，再继续后面的最小验证。`);
   console.log("");
   console.log("B. 初始化 log-analyze 环境映射");
-  console.log(`请直接维护当前主链 env-map 文件：${envMapTarget}。先用一句话告诉我这一步是在补“常用主机、主机/项目别名、日志目录”的私有信息，后面查日志时你才能自动定位。然后第一步先连接 JumpServer，执行 agentsshcli jump-menu <jumpserver-connection>，把当前 JumpServer 的 Opt 菜单完整展示给我。之后每次只问我一个问题，但只需要向我收集三类信息：我想添加哪些常用主机、这些主机或项目平时有哪些简称 / 别名、这些项目日志通常在哪个目录。JumpServer 菜单确认、主机搜索、真实 hostname / IP 验证、以及写回 ${envMapTarget} 这些动作都由你自己完成；不要一开始就要求我提供完整 hostname。若我给的是简称，先在 JumpServer 菜单层查出真实 hostname / IP，再回显给我并写入映射，然后继续补日志路径，直到客户端里可以正常使用 log-analyze。`);
+  console.log(`请直接维护当前主链 env-map 文件：${envMapTarget}，并以同目录下的 ${ENV_MAP_JSON_FILENAME} 作为结构化事实源。如果文件还不存在，再执行 agentsshcli env-map init --from-config，自动读取 ${configTarget} 里的 JumpServer 连接；如果已经存在，就直接在现有 env-map.json 基础上补充，不要重复 init，只有确认整体重建时才使用 --force。然后先用一句话告诉我这一步是在补“常用主机、主机/项目别名、日志目录”的私有信息，后面查日志时你才能自动定位。之后不要按 14 个问题逐条追问，而是只收集 4 组信息：1. 有哪些 JumpServer 分别对应什么环境；2. 各环境日志一般在哪个路径模式；3. 最常查的项目和简称；4. 一组常用主机列表。若我给的是简称，先在 JumpServer 菜单层查出真实 hostname / IP，再用 agentsshcli env-map add-host 写回结构化映射，最后自动渲染回 ${envMapTarget}。`);
 }
 
 function copyFileEnsured(source, target) {
@@ -1028,6 +1779,7 @@ async function runInstallAi(args) {
   const explicitClients = [];
   const clientRoots = new Map();
   let primaryClient;
+  let presetName;
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -1042,6 +1794,11 @@ async function runInstallAi(args) {
     }
     if (arg === "--config-dir") {
       configDir = expandHome(args[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === "--preset") {
+      presetName = String(args[i + 1] || "").trim();
       i += 1;
       continue;
     }
@@ -1096,6 +1853,20 @@ async function runInstallAi(args) {
 
   if (skillsDir && explicitClients.length > 0) {
     throw new Error("--skills-dir 不能和 --client/--clients 混用");
+  }
+  if (presetName) {
+    const preset = INSTALL_PRESETS[presetName];
+    if (!preset) {
+      throw new Error(`未知 preset: ${presetName}`);
+    }
+    if (skillsDir) {
+      primaryClient = "custom";
+      linkSecondary = false;
+    } else {
+      explicitClients.push(...preset.clients);
+      primaryClient = preset.primaryClient;
+      linkSecondary = preset.linkSecondary;
+    }
   }
 
   const sources = {
@@ -1191,6 +1962,7 @@ async function runInstallAi(args) {
   console.log(`- 已更新 skill: ${primaryInstalled.agentSkillTarget}`);
   console.log(`- 已更新 skill: ${path.join(primaryInstalled.logSkillDir, "SKILL.md")}`);
   console.log(`- ${primaryInstalled.envCreated ? "已初始化" : "已保留"} env-map: ${primaryInstalled.envMapTarget}`);
+  console.log(`- 结构化 env-map: ${primaryInstalled.envMapJsonTarget}`);
   console.log(`- ${configCreated ? "已初始化" : "已保留"} config: ${configTarget}`);
 
   for (const result of secondaryResults) {
@@ -1241,6 +2013,16 @@ if (process.argv[2] === "doctor-skills") {
 if (process.argv[2] === "sync-skills") {
   try {
     const exitCode = await runSyncSkills(process.argv.slice(3));
+    process.exit(exitCode);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+if (process.argv[2] === "env-map") {
+  try {
+    const exitCode = await runEnvMap(process.argv.slice(3));
     process.exit(exitCode);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

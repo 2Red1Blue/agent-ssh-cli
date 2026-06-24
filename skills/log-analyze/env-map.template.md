@@ -3,8 +3,15 @@
 这是本机 `log-analyze` skill 的私有环境模板。
 
 首次安装后，请由你当前使用的 AI 负责补齐和维护，不要把真实线上信息提交回公共仓库。
+推荐把同目录下的 `env-map.json` 作为结构化事实源，再自动渲染出 `env-map.md` 供人类阅读。
 这里记录的不是抽象“映射”概念，而是你平时会说的项目简称、机器简称、真实 hostname/IP、以及各项目真实日志目录。
-用户通常只需要告诉 AI：常用主机、别名、日志目录；其余搜索、验证、写回，都由 AI 完成。
+用户通常只需要告诉 AI：JumpServer 与环境对应关系、日志路径模式、项目别名、常用主机列表；其余搜索、验证、写回，都由 AI 完成。
+
+建议先执行：
+
+```bash
+agentsshcli env-map init --from-config
+```
 
 ## JumpServer Connections
 

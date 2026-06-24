@@ -12,7 +12,7 @@
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node.js >=18"></a>
   <a href="https://www.npmjs.com/"><img src="https://img.shields.io/badge/npm-%3E%3D8-CB3837?logo=npm&logoColor=white" alt="npm >=8"></a>
   <a href="https://github.com/2Red1Blue/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.4-blue" alt="release v0.1.4"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.5-blue" alt="release v0.1.5"></a>
   <a href="https://github.com/2Red1Blue/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
@@ -102,7 +102,7 @@ agentsshcli doctor-skills
 agentsshcli sync-skills
 ```
 
-`sync-skills` 默认会尽量保留你本地补充的内容，并备份当前 `SKILL.md`；`env-map.md` 和私有配置不会被覆盖。
+`sync-skills` 默认会尽量保留你本地补充的内容，并备份当前 `SKILL.md`；`env-map.json` / `env-map.md` 和私有配置不会被覆盖。
 
 首次安装后，如果要让 AI 交互式补齐你自己的环境映射，请参考：
 
@@ -112,26 +112,29 @@ agentsshcli sync-skills
 
 - 安装阶段让 AI 处理：装 CLI、装 skills、初始化 JumpServer 配置
 - SSH 配好后第一步先 `agentsshcli jump-menu <jumpserver-connection>`，展示当前 JumpServer 的 `Opt>` 菜单
-- 然后你只需要告诉 AI：要添加哪些常用主机、别名有哪些、日志目录在哪里
-- 剩下的主机搜索、真实 hostname/IP 验证、以及 `env-map.md` 回填，都交给你当前正在使用的 AI 完成
+- 若 `env-map.json` / `env-map.md` 还不存在，再执行 `agentsshcli env-map init --from-config`，自动从 `config.json` 发现 JumpServer 连接
+- 然后你只需要告诉 AI：JumpServer 与环境关系、日志路径模式、项目别名、常用主机列表
+- 剩下的主机搜索、真实 hostname/IP 验证、以及 `env-map.json -> env-map.md` 回填，都交给你当前正在使用的 AI 完成
 
-`env-map.md` 建议由 AI 自行维护，而不是要求用户长期手工编辑。这个文件本质上是 AI 的本地环境记忆：
+`env-map.json` 建议作为结构化事实源由 AI 自行维护，再自动渲染 `env-map.md` 供人类阅读，而不是要求用户长期手工编辑 Markdown。这个文件本质上是 AI 的本地环境记忆：
 
-- 用户提供：常用主机、简称/别名、日志目录
+- 用户提供：JumpServer 与环境关系、日志路径模式、项目别名、常用主机列表
 - AI 负责：JumpServer 菜单确认、真实主机搜索、验证、写入和后续更新
 
 如果你是在 AI 对话里继续做这一步，推荐让 AI 先做两件事：
 
-- 先直接告诉你“当前主链 `env-map.md` 的真实路径”
+- 先直接告诉你“当前主链 `env-map.json` / `env-map.md` 的真实路径”
 - 先执行 `agentsshcli jump-menu <jumpserver-connection>`，把当前 `Opt>` 菜单完整展示给你
+- 若文件尚不存在，再执行 `agentsshcli env-map init --from-config`
 
 然后再继续补这些信息：
 
-- 要添加哪些常用主机
-- 这些主机或项目有哪些简称 / 别名
-- 这些项目日志通常在哪个目录
+- 有哪些 JumpServer 分别对应什么环境
+- 各环境日志通常在哪个路径模式
+- 最常查的项目与简称 / 别名
+- 一组常用主机列表
 
-这样用户不会卡在“文件到底在哪”，也不会在还没看到 JumpServer 菜单前就被要求提供 hostname；`env-map.md` 的维护动作则由 AI 自己完成。
+这样用户不会卡在“文件到底在哪”，也不会在还没看到 JumpServer 菜单前就被要求提供 hostname；结构化 `env-map` 的维护动作则由 AI 自己完成。若 `env-map` 已存在，就应该直接增量维护，只有明确整体重建时才使用 `agentsshcli env-map init --force`。
 
 ## 手动安装
 ### 环境要求
@@ -334,24 +337,32 @@ agentsshcli add-jump-server \
 - `jumpServer.searchPrefix: "/"`、`charDelayMs: 60`、`enterStrategy: "direct-then-search"`
 - 默认 `commandBlacklist`（拒绝 `rm` / `truncate` / `reboot` / `shutdown` / `systemctl stop|restart|reload` / `kill`）
 
-文件不存在会自动创建，权限置为 `0600`。同名连接已存在时报错；加 `--force` 覆盖。
+文件不存在会自动创建，权限置为 `0600`。同名连接已存在时报错；加 `--force` 覆盖。正式写入前也可以先用 `--dry-run` 预检参数。
 
 ### AI 交互式生成模板
 
 把下面这段贴给 AI（Claude Code / 任意 agent）即可让它带你走一遍：
 
 ```
-你是 agent-ssh-cli 跳板机配置助手。请按以下顺序问我，每次只问一个问题，
-收到回答后立即更新草稿，最后用 agentsshcli add-jump-server 一次性写入。
+你是 agent-ssh-cli 跳板机配置助手。请按以下顺序问我，每次只问一个问题。
+先做前置确认，再收集参数，正式写入前先用 --dry-run 预检。
+
+前置确认：
+1. 我是否使用私钥认证（不是密码认证）
+2. 私钥路径是否已经存在于本机
 
 要收集的参数：
 1. 连接名（建议 prod.jumpserver / test.jumpserver，需唯一）
 2. JumpServer host（IP 或域名）
-3. SSH 端口（默认 22，跳板机通常自定义端口如 8390 / 2222）
+3. SSH 端口（默认 8390，确认是否需要改）
 4. SSH 用户名
-5. 私钥绝对路径（PEM 格式，私钥需对当前用户可读）
+5. 私钥绝对路径
 
-收集完执行：
+先预检：
+  agentsshcli add-jump-server --dry-run --name <name> --host <host> --port <port> \
+    --username <user> --private-key <key>
+
+预检通过后正式写入：
   agentsshcli add-jump-server --name <name> --host <host> --port <port> \
     --username <user> --private-key <key>
 
