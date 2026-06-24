@@ -37,28 +37,39 @@
 
 ## AI 应该如何做
 
-AI 在第一次使用 `log-analyze` 前，若发现缺少环境映射，应按下面顺序**每次只问一个问题**：
+AI 在第一次使用 `log-analyze` 前，若发现缺少环境映射，应先用一句话告诉用户：
+
+- “我接下来是在补你们团队常用的项目名、机器简称和日志目录。补完后，后面你只给我告警或简单机器名，我就能自动定位目标机和日志。”
+
+在正式提问前，还应先告诉用户当前主链 `env-map.md` 的真实路径。默认由当前 AI 继续维护这个文件；只有当用户明确要求自己手填时，AI 才停在“文件路径 + 填写顺序 + 最小验证命令”这一层。
+
+然后按下面顺序**每次只问一个问题**：
 
 1. 线上 JumpServer 连接名是什么
 2. 是否有独立测试 JumpServer；如果有，连接名是什么
 3. 预发布是否与线上共用同一个 JumpServer
-4. 线上机器通常用 hostname 还是 IP 作为 target
-5. 预发布机器通常用 hostname 还是 IP 作为 target
-6. 测试机器通常用 hostname 还是 IP 作为 target
-7. 线上日志保存路径模式是什么（例如 `/www/<project>/logs` 或 `/data/<project>/logs`）
-8. 预发布日志保存路径模式是什么
-9. 测试日志保存路径模式是什么
-10. 常用项目有哪些简称/别名
-11. 每个项目在各环境下的默认目标机或目标机列表是什么
+4. 默认先查哪个环境（prod / yfb / test）
+5. 线上日志通常在 `/www/<project>/logs`、`/data/<project>/logs`，还是别的真实路径
+6. 预发布日志通常在哪个真实路径
+7. 测试日志通常在哪个真实路径
+8. 你平时最常查的项目名或简称有哪些
+9. 你平时怎么称呼各环境（如“线上 / 预发 / 测试”）以及各 JumpServer（如“线上跳板机”）
+10. 询问用户是否愿意直接给一组常用主机列表（hostname、机器简称或 IP 都可以）
+11. 如果用户给了主机列表，按“小并发”做轻量验证：一个候选主机一个线程，但总并发建议控制在 `2~4`；成功项写回映射，失败项单独标记后再向用户确认
+12. 如果用户没有主机列表，再退回“先拿一个最常用的机器线索做验证”：可以是机器简称、业务名、实例尾号，或直接 IP
+13. 首次验证成功后，把返回的真实 hostname 展示给用户，并追问：这个项目以后默认就用这台吗，日志真实路径是否与上面的模式一致
+14. 如果用户还会用其它简称（如 `api-02`、`adserving-api`、`线上`、`预发跳板机`），再分别补到机器简称、项目别名、环境别名、JumpServer 别名映射
 
 ## 推荐收集后的结构
 
 AI 收集完成后，建议把这些信息整理成：
 
 - JumpServer 连接映射
+- JumpServer 别名映射
 - 环境到日志保存路径模式映射
+- 环境别名映射
 - 项目别名映射
-- 项目到默认 target 映射
+- 项目到已验证默认 target 映射
 - 机器简称到 hostname/IP 映射
 - 日志归档命名约定（如果团队有特殊规则，也可补进 `env-map`）
 
@@ -117,7 +128,24 @@ Hermes     -> ~/.hermes/skills/
 
 ## 最小验证命令
 
-在 AI 补齐配置后，应立即要求它做最小验证：
+在 AI 补齐配置后，第一步先让它连接 JumpServer 并展示 `Opt>` 菜单；确认完菜单后，再做最小验证。验证时不要先要求用户给完整 hostname，而是优先接受：
+
+- 机器简称，如 `api-02`
+- 项目名或业务名，如 `adserving-api`
+- 实例尾号
+- 直接 IP
+- 一组常用主机列表
+
+若验证成功，必须把返回的真实 hostname 回显给用户，再写入 `env-map`。
+
+推荐顺序：
+
+```bash
+agentsshcli jump-menu <prod-connection>
+agentsshcli jump-menu <test-connection>
+```
+
+最小验证命令：
 
 ```bash
 agentsshcli jump-exec --timeout 120000 <prod-connection> --target <known-prod-target> "hostname"
@@ -135,17 +163,15 @@ agentsshcli jump-exec --timeout 120000 <connection> --target <target> "ls -1 <lo
 可以把下面这段直接交给 AI：
 
 ```text
-你现在要初始化 log-analyze 的环境映射。请每次只问我一个问题，按以下顺序收集：
-1. 线上 JumpServer 连接名
-2. 测试 JumpServer 连接名（如果有）
-3. 预发布是否与线上共用同一 JumpServer
-4. 线上/预发布/测试各自的日志保存路径模式（例如 `/www/<project>/logs` 或 `/data/<project>/logs`）
-5. 常用项目简称
-6. 每个项目在各环境下的默认目标机（hostname 或 IP）
+你现在要初始化 log-analyze。第一步先连接 JumpServer，执行 agentsshcli jump-menu <jumpserver-connection>，把当前 JumpServer 的 Opt 菜单完整展示给我。确认完菜单后，再用一句话说明这一步是在补“常用主机、主机/项目别名、日志目录”的私有信息，后面查日志时你才能自动定位。然后每次只问我一个问题，但只需要向我收集三类信息：
+1. 我想添加哪些常用主机
+2. 这些主机或项目平时有哪些简称 / 别名
+3. 这些项目日志通常在哪个目录
 
 收集完成后：
 1. 把映射写入我本地的 log-analyze `env-map`
-2. 用 agentsshcli jump-exec 做最小验证
-3. 确认当前客户端技能列表里已经能看到 log-analyze
-4. 给我一个简短总结，告诉我后续可以怎么直接使用 /log-analyze
+2. JumpServer 菜单确认、主机搜索、真实 hostname / IP 验证这些动作都由你自己完成；不要一开始就要求我提供完整 hostname
+3. 用 agentsshcli jump-exec 做最小验证；验证成功后把真实 hostname 回显给我
+4. 确认当前客户端技能列表里已经能看到 log-analyze
+5. 给我一个简短总结，告诉我后续可以怎么直接使用 /log-analyze
 ```

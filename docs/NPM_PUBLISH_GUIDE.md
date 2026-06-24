@@ -140,7 +140,7 @@ npm publish --access public
 回到仓库根目录：
 
 ```bash
-cd /Users/liuzx/Code/java/work/agent-ssh-cli
+cd /path/to/agent-ssh-cli
 npm publish --access public
 ```
 

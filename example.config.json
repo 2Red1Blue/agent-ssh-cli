@@ -58,7 +58,7 @@
     "jumpServer": {
       "enabled": true,
       "promptRegex": "Opt>\\s*$",
-      "shellPromptRegex": "(?m)[#$>]\\s*$",
+      "shellPromptRegex": "(?m)[#$]\\s*$",
       "searchPrefix": "/",
       "charDelayMs": 60,
       "enterStrategy": "direct-then-search"
@@ -69,9 +69,7 @@
       "(^|[;&|()\\s])reboot(\\s|$)",
       "(^|[;&|()\\s])truncate(\\s|$)",
       "(^|[;&|()\\s])systemctl\\s+(stop|restart|reload)(\\s|$)",
-      "(^|[;&|()\\s])kill(\\s|$)",
-      ">",
-      ">>"
+      "(^|[;&|()\\s])kill(\\s|$)"
     ]
   },
   {
@@ -84,7 +82,7 @@
     "jumpServer": {
       "enabled": true,
       "promptRegex": "Opt>\\s*$",
-      "shellPromptRegex": "(?m)[#$>]\\s*$",
+      "shellPromptRegex": "(?m)[#$]\\s*$",
       "searchPrefix": "/",
       "charDelayMs": 60,
       "enterStrategy": "direct-then-search"
@@ -95,9 +93,7 @@
       "(^|[;&|()\\s])reboot(\\s|$)",
       "(^|[;&|()\\s])truncate(\\s|$)",
       "(^|[;&|()\\s])systemctl\\s+(stop|restart|reload)(\\s|$)",
-      "(^|[;&|()\\s])kill(\\s|$)",
-      ">",
-      ">>"
+      "(^|[;&|()\\s])kill(\\s|$)"
     ]
   }
 ]

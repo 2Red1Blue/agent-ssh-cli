@@ -215,6 +215,7 @@ agentsshcli exec --no-pty "<connectionName>" "<command>"
 
 ```bash
 agentsshcli exec --connection "<connectionName>" --command "<command>" --directory "/root" --timeout 5000
+agentsshcli exec --connection "<connectionName>" --command "<command>" --directory "/root" --timeout 5000 --total-timeout 120000
 agentsshcli exec --connection "<connectionName>" --command-file "./script.sh" --timeout 5000
 agentsshcli exec --no-cache --connection "<connectionName>" --command "<command>"
 ```
@@ -227,7 +228,8 @@ agentsshcli exec --no-cache --connection "<connectionName>" --command "<command>
 - `--command <command>`: 远端命令
 - `--command-file <path>`: 从本地 UTF-8 文件读取远端命令，适合执行多行脚本，文件必须使用 LF 换行，不能使用 Windows CRLF 换行；不能和 `--command` 或位置参数 `<command>` 同时使用
 - `--directory <dir>`, `-d <dir>`: 远端工作目录
-- `--timeout <ms>`, `-t <ms>`: 超时毫秒值，默认 `30000`
+- `--timeout <ms>`, `-t <ms>`: 空闲超时毫秒值，默认 `30000`；远端持续输出时会自动续期
+- `--total-timeout <ms>`: 可选，总超时上限；默认不设总上限
 - `--pty`: 本次命令分配伪终端，优先级高于配置文件
 - `--no-pty`: 本次命令不分配伪终端，优先级高于配置文件
 - `--no-cache`: 不复用连接，必须放在连接名或 `--connection` 前
@@ -350,17 +352,18 @@ agentsshcli --version
 
 适用场景：目标主机只能经 JumpServer 堡垒机访问。CLI 内部完成：连网关 → 等菜单 prompt → 慢速发送 target → 等 shell prompt → 执行 marker 包装命令 → 截取输出和 exit code。
 
-当前实现默认按单次直连执行，不走 Rust daemon 连接缓存；这样在长日志、长输出场景下更稳定，也更接近一次排障一次连接的实际使用方式。
+当前实现默认复用 Rust daemon 跳板缓存连接；轻量探测和连续排障会明显更快。若遇到超长日志、长输出场景下缓存链路不稳定，可临时加 `--no-cache` 改为单次直连。
 
 ```bash
-agentsshcli jump-exec <gatewayConnection> --target <hostOrIp> "<command>" [--timeout <ms>]
+agentsshcli jump-exec <gatewayConnection> --target <hostOrIp> "<command>" [--timeout <ms>] [--total-timeout <ms>]
 ```
 
 参数：
 
 - `<gatewayConnection>`：在 `config.json` 中配置了 `jumpServer.enabled=true` 的连接名
 - `--target <hostOrIp>`：目标主机的 hostname 或 IP
-- `--timeout <ms>`：可选，默认 `60000`。命令执行阶段沿用此预算（最低 10s），高负载机器请调大到 `120000` 以上
+- `--timeout <ms>`：可选，默认 `60000`。表示空闲超时；只要远端持续输出，等待会自动续期
+- `--total-timeout <ms>`：可选。整次 jump-exec 的硬上限；默认不设总上限
 - `--config <path>`：可选，覆盖默认配置路径
 
 使用前提：
@@ -379,19 +382,19 @@ agentsshcli jump-exec <gatewayConnection> --target <hostOrIp> "<command>" [--tim
 
 ```bash
 # 单机执行
-agentsshcli jump-exec prod.jumpserver --target hwtf-adserving-api-02 "hostname && uptime"
+agentsshcli jump-exec prod.jumpserver --target app-api-02 "hostname && uptime"
 
 # 多机循环
-for host in hwtf-adserving-api-01 hwtf-adserving-api-02; do
+for host in app-api-01 app-api-02; do
   echo "=== $host ==="
   agentsshcli jump-exec prod.jumpserver --target $host "uptime"
 done
 
 # 高负载机器需要更长 timeout
-agentsshcli jump-exec --timeout 120000 prod.jumpserver --target hwtf-adserving-api-01 "ps aux --sort=-%cpu | head -10"
+agentsshcli jump-exec --timeout 120000 prod.jumpserver --target app-api-01 "ps aux --sort=-%cpu | head -10"
 
 # 拉日志
-agentsshcli jump-exec prod.jumpserver --target hwtf-adserving-api-02 "tail -100 /www/hw-adserving-api/logs/app.log"
+agentsshcli jump-exec prod.jumpserver --target app-api-02 "tail -100 /www/app-api/logs/app.log"
 ```
 
 ## add-jump-server（一键生成跳板机配置，AI 优先使用）

@@ -39,6 +39,7 @@ const MIGRATION_LOCK_FILE: &str = ".password-migration.lock";
 const SECRETS_VERSION: u8 = 1;
 const PASSWORD_REF_PREFIX: &str = "agentsshcli:";
 const DEFAULT_CACHE_TTL_MS: u64 = 180_000;
+const EXEC_HEARTBEAT_MARKER: &str = "__EXEC_HB__";
 /// 跳板机 PTY 心跳占位符。jump-exec 长命令期间每 20s 输出一行，避免 JumpServer
 /// 把会话当成 idle 主动关闭；extract_marker_output 会按行过滤掉这些占位。
 const HEARTBEAT_MARKER: &str = "__JUMP_HB__";
@@ -54,16 +55,17 @@ const HELP_AGENTSSHCLI: &str = r#"
 用法:
   agentsshcli list [--config <path>] [--json]
   agentsshcli exec [--config <path>] [--no-cache] [--cache-ttl <ms>] [--pty|--no-pty] <connectionName> <command>
-  agentsshcli exec [--config <path>] [--no-cache] [--cache-ttl <ms>] [--pty|--no-pty] --connection <name> (--command <command>|--command-file <path>) [--directory <dir>] [--timeout <ms>]
+  agentsshcli exec [--config <path>] [--no-cache] [--cache-ttl <ms>] [--pty|--no-pty] --connection <name> (--command <command>|--command-file <path>) [--directory <dir>] [--timeout <ms>] [--total-timeout <ms>]
   agentsshcli upload [--config <path>] [--no-cache] [--cache-ttl <ms>] <connectionName> <localPath> <remotePath>
   agentsshcli upload [--config <path>] [--no-cache] [--cache-ttl <ms>] --connection <name> --local <path> --remote <path>
   agentsshcli download [--config <path>] [--no-cache] [--cache-ttl <ms>] <connectionName> <remotePath> <localPath>
   agentsshcli download [--config <path>] [--no-cache] [--cache-ttl <ms>] --connection <name> --remote <path> --local <path>
-  agentsshcli jump-exec [--config <path>] [--timeout <ms>] <gatewayConnection> --target <hostOrIp> <command>
+  agentsshcli jump-search [--config <path>] [--timeout <ms>] [--total-timeout <ms>] <gatewayConnection> <query>
+  agentsshcli jump-exec [--config <path>] [--no-cache] [--cache-ttl <ms>] [--timeout <ms>] <gatewayConnection> --target <hostOrIp> <command>
   agentsshcli add-jump-server [--config <path>] --name <name> --host <host> [--port <port>] --username <user> --private-key <path> [--force]
   agentsshcli init-config
   agentsshcli stop-daemon [--config <path>]
-  agentsshcli help [list|exec|upload|download|jump-exec|add-jump-server|stop-daemon]
+  agentsshcli help [list|exec|upload|download|jump-search|jump-exec|add-jump-server|stop-daemon]
   agentsshcli --help
   agentsshcli --version
 
@@ -71,15 +73,46 @@ const HELP_AGENTSSHCLI: &str = r#"
   agent-ssh-cli Rust 原生入口。当前 SSH 操作使用 russh 直连，缓存参数保留用于兼容旧脚本。
 "#;
 
+const HELP_JUMP_SEARCH: &str = r#"
+用法:
+  agentsshcli jump-search [--config <path>] [--timeout <ms>] [--total-timeout <ms>] <gatewayConnection> <query>
+  agentsshcli jump-search [--config <path>] [--timeout <ms>] [--total-timeout <ms>] --connection <name> --query <text>
+  agentsshcli help jump-search
+  agentsshcli --version
+
+说明:
+  在 JumpServer 菜单层搜索当前账号有权限的主机候选，不直接进入目标机 shell。
+  适合用户只给了业务简称、机器简称、实例尾号或 IP 片段时，先查出真实 hostname / IP。
+  网关连接必须在 config.json 中配置 jumpServer.enabled=true。
+  --timeout 控制“无输出/无响应”超时，默认 15000ms；--total-timeout 可选，用于设置整次搜索的硬上限。
+"#;
+
+const HELP_JUMP_MENU: &str = r#"
+用法:
+  agentsshcli jump-menu [--config <path>] [--timeout <ms>] [--total-timeout <ms>] <gatewayConnection>
+  agentsshcli jump-menu [--config <path>] [--timeout <ms>] [--total-timeout <ms>] --connection <name>
+  agentsshcli help jump-menu
+  agentsshcli --version
+
+说明:
+  首次进入 JumpServer 菜单并原样展示 Opt> 上方的菜单内容，不直接搜索、不进入目标机 shell。
+  适合先确认当前跳板机支持哪些菜单命令，再决定是否使用 p、/关键词 或其它自定义操作。
+  网关连接必须在 config.json 中配置 jumpServer.enabled=true。
+  --timeout 控制“无输出/无响应”超时，默认 15000ms；--total-timeout 可选，用于设置整次操作的硬上限。
+"#;
+
 const HELP_JUMP_EXEC: &str = r#"
 用法:
-  agentsshcli jump-exec [--config <path>] [--timeout <ms>] <gatewayConnection> --target <hostOrIp> <command>
+  agentsshcli jump-exec [--config <path>] [--no-cache] [--cache-ttl <ms>] [--timeout <ms>] [--total-timeout <ms>] <gatewayConnection> --target <hostOrIp> <command>
   agentsshcli help jump-exec
   agentsshcli --version
 
 说明:
   通过 JumpServer 跳板机以菜单 PTY 模式连接目标主机并执行命令。
   网关连接必须在 config.json 中配置 jumpServer.enabled=true。
+  默认复用 daemon 缓存连接，空闲超过 cache-ttl 后自动回收；可用 --no-cache 改为每次直连。
+  --timeout 控制“无输出/无响应”超时，默认 60000ms；命令阶段有持续输出时会自动续期。
+  --total-timeout 可选，用于设置整次 jump-exec 的硬上限；默认不设总上限，避免大日志检索被固定总时长误杀。
   upload / download 不支持 JumpServer 模式。
 "#;
 
@@ -90,7 +123,7 @@ const HELP_ADD_JUMP_SERVER: &str = r#"
 
 说明:
   将一个 JumpServer 跳板机连接追加到 ~/.agent-ssh-cli/config.json，
-  自动填入 jumpServer 字段（promptRegex=Opt>，shellPromptRegex=[#$>]，charDelayMs=60，
+  自动填入 jumpServer 字段（promptRegex=Opt>，shellPromptRegex=[#$]，charDelayMs=60，
   enterStrategy=direct-then-search）和常用 commandBlacklist。
   若 config.json 不存在会自动创建并设置 0600 权限。
   同名连接已存在时报错，加 --force 覆盖。
@@ -118,12 +151,14 @@ const HELP_LIST: &str = r#"
 const HELP_EXEC: &str = r#"
 用法:
   agentsshcli exec [--config <path>] [--no-cache] [--cache-ttl <ms>] [--pty|--no-pty] <connectionName> <command>
-  agentsshcli exec [--config <path>] [--no-cache] [--cache-ttl <ms>] [--pty|--no-pty] --connection <name> (--command <command>|--command-file <path>) [--directory <dir>] [--timeout <ms>]
+  agentsshcli exec [--config <path>] [--no-cache] [--cache-ttl <ms>] [--pty|--no-pty] --connection <name> (--command <command>|--command-file <path>) [--directory <dir>] [--timeout <ms>] [--total-timeout <ms>]
   agentsshcli help exec
   agentsshcli --version
 
 说明:
   在远端执行命令。默认不分配伪终端，可通过 --pty 临时开启。
+  --timeout 控制“无输出/无响应”超时，默认 30000ms；命令仍持续输出时会自动续期。
+  --total-timeout 可选，用于设置整次 exec 的硬上限；默认不设总上限。
 "#;
 
 const HELP_UPLOAD: &str = r#"
@@ -276,7 +311,8 @@ struct ExecuteArgs {
     command: String,
     command_file: Option<String>,
     directory: Option<String>,
-    timeout_ms: u64,
+    idle_timeout_ms: u64,
+    total_timeout_ms: Option<u64>,
     pty: Option<bool>,
 }
 
@@ -303,7 +339,31 @@ struct JumpExecArgs {
     target: String,
     command: String,
     command_file: Option<String>,
-    timeout_ms: u64,
+    idle_timeout_ms: u64,
+    total_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug)]
+struct JumpSearchArgs {
+    global: GlobalArgs,
+    connection_name: String,
+    query: String,
+    idle_timeout_ms: u64,
+    total_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug)]
+struct JumpMenuArgs {
+    global: GlobalArgs,
+    connection_name: String,
+    idle_timeout_ms: u64,
+    total_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CommandTimeouts {
+    idle_timeout_ms: u64,
+    total_timeout_ms: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -339,6 +399,8 @@ fn run(argv: Vec<String>) -> AppResult<()> {
         "exec" => run_exec(args.to_vec()),
         "upload" => run_upload(args.to_vec()),
         "download" => run_download(args.to_vec()),
+        "jump-menu" => run_jump_menu(args.to_vec()),
+        "jump-search" => run_jump_search(args.to_vec()),
         "jump-exec" => run_jump_exec(args.to_vec()),
         "add-jump-server" => run_add_jump_server(args.to_vec()),
         "stop-daemon" => run_stop_daemon(args.to_vec()),
@@ -362,6 +424,8 @@ fn print_help(name: &str) -> AppResult<()> {
         "exec" | "sshx" => HELP_EXEC,
         "upload" | "sshupload" => HELP_UPLOAD,
         "download" | "sshdownload" => HELP_DOWNLOAD,
+        "jump-menu" | "jumpmenu" => HELP_JUMP_MENU,
+        "jump-search" | "jumpsearch" => HELP_JUMP_SEARCH,
         "jump-exec" | "jumpexec" => HELP_JUMP_EXEC,
         "add-jump-server" => HELP_ADD_JUMP_SERVER,
         "stop-daemon" => HELP_STOP_DAEMON,
@@ -1222,7 +1286,8 @@ fn parse_execute_args(argv: Vec<String>) -> AppResult<ExecuteArgs> {
             command: String::new(),
             command_file: None,
             directory: None,
-            timeout_ms: 30000,
+            idle_timeout_ms: 30000,
+            total_timeout_ms: None,
             pty: None,
         });
     }
@@ -1232,6 +1297,7 @@ fn parse_execute_args(argv: Vec<String>) -> AppResult<ExecuteArgs> {
     let command_file = take_option(&mut args, &["--command-file"])?;
     let directory = take_option(&mut args, &["--directory", "-d"])?;
     let timeout_value = take_option(&mut args, &["--timeout", "-t"])?;
+    let total_timeout_value = take_option(&mut args, &["--total-timeout"])?;
     let pty = take_bool_flag_pair(&mut args, "--pty", "--no-pty")?;
     let connection_positional = take_positional(&mut args, "connectionName")?;
     let command_positional = take_positional(&mut args, "command")?;
@@ -1254,9 +1320,13 @@ fn parse_execute_args(argv: Vec<String>) -> AppResult<ExecuteArgs> {
             "缺少必填参数 connectionName 或 command，使用 --help 查看说明",
         ));
     }
-    let timeout_ms = match timeout_value {
+    let idle_timeout_ms = match timeout_value {
         Some(value) => normalize_positive_u64(&value, "timeout 必须是正整数毫秒值")?,
         None => 30000,
+    };
+    let total_timeout_ms = match total_timeout_value {
+        Some(value) => Some(normalize_positive_u64(&value, "total-timeout 必须是正整数毫秒值")?),
+        None => None,
     };
     Ok(ExecuteArgs {
         global,
@@ -1264,7 +1334,8 @@ fn parse_execute_args(argv: Vec<String>) -> AppResult<ExecuteArgs> {
         command,
         command_file,
         directory,
-        timeout_ms,
+        idle_timeout_ms,
+        total_timeout_ms,
         pty,
     })
 }
@@ -1428,7 +1499,10 @@ fn run_exec(argv: Vec<String>) -> AppResult<()> {
             &configs,
             connection,
             &remote_command,
-            parsed.timeout_ms,
+            CommandTimeouts {
+                idle_timeout_ms: parsed.idle_timeout_ms,
+                total_timeout_ms: parsed.total_timeout_ms,
+            },
             resolve_pty(connection, parsed.pty),
         )?
     } else {
@@ -1825,6 +1899,7 @@ async fn execute_remote_command_with_session_async(
     connection: &Connection,
     remote_command: &str,
     pty: bool,
+    timeouts: CommandTimeouts,
 ) -> AppResult<String> {
     let mut channel = session.channel_open_session().await.map_err(|error| {
         AppError::new(format!("连接 {} 打开会话失败: {}", connection.name, error))
@@ -1840,14 +1915,27 @@ async fn execute_remote_command_with_session_async(
                 ))
             })?;
     }
-    channel.exec(true, remote_command).await.map_err(|error| {
+    let wrapped_remote_command = wrap_command_with_heartbeat(remote_command, EXEC_HEARTBEAT_MARKER);
+    channel.exec(true, wrapped_remote_command.as_str()).await.map_err(|error| {
         AppError::new(format!("连接 {} 执行命令失败: {}", connection.name, error))
     })?;
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut exit_status = None;
-    while let Some(msg) = channel.wait().await {
+    let total_deadline = total_deadline_from_ms(timeouts.total_timeout_ms);
+    loop {
+        let wait_budget = phase_timeout_ms(timeouts.idle_timeout_ms, total_deadline);
+        let msg = match tokio::time::timeout(Duration::from_millis(wait_budget), channel.wait()).await {
+            Ok(Some(msg)) => msg,
+            Ok(None) => break,
+            Err(_) => {
+                return Err(AppError::new(format!(
+                    "连接 {} 执行命令等待输出空闲超时",
+                    connection.name
+                )))
+            }
+        };
         match msg {
             ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
             ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
@@ -1855,7 +1943,7 @@ async fn execute_remote_command_with_session_async(
             _ => {}
         }
     }
-    let stdout = String::from_utf8_lossy(&stdout).trim_end().to_string();
+    let stdout = strip_exec_heartbeat_lines(&String::from_utf8_lossy(&stdout));
     let stderr = String::from_utf8_lossy(&stderr).trim_end().to_string();
     let code = exit_status.unwrap_or(0);
     if code != 0 {
@@ -1877,10 +1965,11 @@ async fn execute_remote_command_async(
     connection: &Connection,
     remote_command: &str,
     pty: bool,
+    timeouts: CommandTimeouts,
 ) -> AppResult<String> {
     let session = connect_russh(configs, connection).await?;
     let result =
-        execute_remote_command_with_session_async(&session, connection, remote_command, pty).await;
+        execute_remote_command_with_session_async(&session, connection, remote_command, pty, timeouts).await;
     let _ = session
         .disconnect(Disconnect::ByApplication, "", "English")
         .await;
@@ -1891,12 +1980,12 @@ fn execute_remote_command(
     configs: &[Connection],
     connection: &Connection,
     remote_command: &str,
-    timeout_ms: u64,
+    timeouts: CommandTimeouts,
     pty: bool,
 ) -> AppResult<String> {
     run_with_timeout(
-        timeout_ms,
-        execute_remote_command_async(configs, connection, remote_command, pty),
+        command_runtime_timeout_ms(timeouts.idle_timeout_ms, timeouts.total_timeout_ms),
+        execute_remote_command_async(configs, connection, remote_command, pty, timeouts),
     )
 }
 
@@ -2302,6 +2391,14 @@ fn strip_ansi(input: &str) -> String {
     ansi_regex().replace_all(input, "").into_owned()
 }
 
+fn wrap_command_with_heartbeat(command: &str, heartbeat_marker: &str) -> String {
+    format!(
+        "{{ ( {cmd} ) & __agent_pid=$!; ( while kill -0 $__agent_pid 2>/dev/null; do printf '{hb}\\n'; sleep 1; done ) & __agent_hb=$!; wait $__agent_pid; __agent_status=$?; kill $__agent_hb >/dev/null 2>&1; wait $__agent_hb >/dev/null 2>&1; exit $__agent_status; }}",
+        cmd = command,
+        hb = heartbeat_marker,
+    )
+}
+
 fn parse_jump_exec_args(argv: Vec<String>) -> AppResult<JumpExecArgs> {
     let global = parse_global_args(argv)?;
     if global.help || global.version {
@@ -2311,7 +2408,8 @@ fn parse_jump_exec_args(argv: Vec<String>) -> AppResult<JumpExecArgs> {
             target: String::new(),
             command: String::new(),
             command_file: None,
-            timeout_ms: 60000,
+            idle_timeout_ms: 60000,
+            total_timeout_ms: None,
         });
     }
     let mut args = global.args.clone();
@@ -2320,6 +2418,7 @@ fn parse_jump_exec_args(argv: Vec<String>) -> AppResult<JumpExecArgs> {
     let command_option = take_option(&mut args, &["--command"])?;
     let command_file = take_option(&mut args, &["--command-file"])?;
     let timeout_value = take_option(&mut args, &["--timeout", "-t"])?;
+    let total_timeout_value = take_option(&mut args, &["--total-timeout"])?;
     let connection_positional = take_positional(&mut args, "gatewayConnection")?;
     let command_positional = take_positional(&mut args, "command")?;
     ensure_no_mixed(
@@ -2347,9 +2446,13 @@ fn parse_jump_exec_args(argv: Vec<String>) -> AppResult<JumpExecArgs> {
     if command.is_empty() && command_file.is_none() {
         return Err(AppError::new("缺少必填参数 command，使用 --help 查看说明"));
     }
-    let timeout_ms = match timeout_value {
+    let idle_timeout_ms = match timeout_value {
         Some(value) => normalize_positive_u64(&value, "timeout 必须是正整数毫秒值")?,
         None => 60000,
+    };
+    let total_timeout_ms = match total_timeout_value {
+        Some(value) => Some(normalize_positive_u64(&value, "total-timeout 必须是正整数毫秒值")?),
+        None => None,
     };
     if target.trim().is_empty() {
         return Err(AppError::new("--target 不能为空"));
@@ -2363,8 +2466,187 @@ fn parse_jump_exec_args(argv: Vec<String>) -> AppResult<JumpExecArgs> {
         target,
         command,
         command_file,
-        timeout_ms,
+        idle_timeout_ms,
+        total_timeout_ms,
     })
+}
+
+fn parse_jump_search_args(argv: Vec<String>) -> AppResult<JumpSearchArgs> {
+    let global = parse_global_args(argv)?;
+    if global.help || global.version {
+        return Ok(JumpSearchArgs {
+            global,
+            connection_name: String::new(),
+            query: String::new(),
+            idle_timeout_ms: 15000,
+            total_timeout_ms: None,
+        });
+    }
+    let mut args = global.args.clone();
+    let connection_option = take_option(&mut args, &["--connection", "-c"])?;
+    let query_option = take_option(&mut args, &["--query"])?;
+    let timeout_value = take_option(&mut args, &["--timeout", "-t"])?;
+    let total_timeout_value = take_option(&mut args, &["--total-timeout"])?;
+    let connection_positional = take_positional(&mut args, "gatewayConnection")?;
+    let query_positional = take_positional(&mut args, "query")?;
+    ensure_no_mixed(
+        &connection_option,
+        &connection_positional,
+        "gatewayConnection",
+    )?;
+    ensure_no_mixed(&query_option, &query_positional, "query")?;
+    ensure_no_unknown_options(&args)?;
+    ensure_no_extra_positionals(&args)?;
+    let connection_name = connection_option
+        .or(connection_positional)
+        .ok_or_else(|| AppError::new("缺少必填参数 gatewayConnection，使用 --help 查看说明"))?;
+    let query = query_option
+        .or(query_positional)
+        .ok_or_else(|| AppError::new("缺少必填参数 query，使用 --help 查看说明"))?;
+    let idle_timeout_ms = match timeout_value {
+        Some(value) => normalize_positive_u64(&value, "timeout 必须是正整数毫秒值")?,
+        None => 15000,
+    };
+    let total_timeout_ms = match total_timeout_value {
+        Some(value) => Some(normalize_positive_u64(&value, "total-timeout 必须是正整数毫秒值")?),
+        None => None,
+    };
+    if query.trim().is_empty() {
+        return Err(AppError::new("query 不能为空"));
+    }
+    Ok(JumpSearchArgs {
+        global,
+        connection_name,
+        query,
+        idle_timeout_ms,
+        total_timeout_ms,
+    })
+}
+
+fn parse_jump_menu_args(argv: Vec<String>) -> AppResult<JumpMenuArgs> {
+    let global = parse_global_args(argv)?;
+    if global.help || global.version {
+        return Ok(JumpMenuArgs {
+            global,
+            connection_name: String::new(),
+            idle_timeout_ms: 15000,
+            total_timeout_ms: None,
+        });
+    }
+    let mut args = global.args.clone();
+    let connection_option = take_option(&mut args, &["--connection", "-c"])?;
+    let timeout_value = take_option(&mut args, &["--timeout", "-t"])?;
+    let total_timeout_value = take_option(&mut args, &["--total-timeout"])?;
+    let connection_positional = take_positional(&mut args, "gatewayConnection")?;
+    ensure_no_mixed(
+        &connection_option,
+        &connection_positional,
+        "gatewayConnection",
+    )?;
+    ensure_no_unknown_options(&args)?;
+    ensure_no_extra_positionals(&args)?;
+    let connection_name = connection_option
+        .or(connection_positional)
+        .ok_or_else(|| AppError::new("缺少必填参数 gatewayConnection，使用 --help 查看说明"))?;
+    let idle_timeout_ms = match timeout_value {
+        Some(value) => normalize_positive_u64(&value, "timeout 必须是正整数毫秒值")?,
+        None => 15000,
+    };
+    let total_timeout_ms = match total_timeout_value {
+        Some(value) => Some(normalize_positive_u64(&value, "total-timeout 必须是正整数毫秒值")?),
+        None => None,
+    };
+    Ok(JumpMenuArgs {
+        global,
+        connection_name,
+        idle_timeout_ms,
+        total_timeout_ms,
+    })
+}
+
+fn run_jump_menu(argv: Vec<String>) -> AppResult<()> {
+    let parsed = parse_jump_menu_args(argv)?;
+    if parsed.global.help {
+        return print_help("jump-menu");
+    }
+    if parsed.global.version {
+        return print_version();
+    }
+    prepare_connection_config(&parsed.global.config_path, &parsed.connection_name)?;
+    let configs = load_config_for_connection(&parsed.global.config_path, &parsed.connection_name)?;
+    let connection = find_connection(&configs, &parsed.connection_name)?;
+    let jump_config = connection
+        .jump_server
+        .as_ref()
+        .ok_or_else(|| {
+            AppError::new(format!(
+                "连接 {} 未配置 jumpServer，无法使用 jump-menu",
+                connection.name
+            ))
+        })?;
+    if !jump_config.enabled {
+        return Err(AppError::new(format!(
+            "连接 {} 的 jumpServer.enabled 为 false，拒绝使用 jump-menu",
+            connection.name
+        )));
+    }
+    let result = run_with_timeout(
+        jump_runtime_timeout_ms(parsed.total_timeout_ms),
+        show_jump_menu_async(
+            &configs,
+            connection,
+            jump_config,
+            parsed.idle_timeout_ms,
+            parsed.total_timeout_ms,
+        ),
+    )?;
+    if !result.is_empty() {
+        println!("{}", result);
+    }
+    Ok(())
+}
+
+fn run_jump_search(argv: Vec<String>) -> AppResult<()> {
+    let parsed = parse_jump_search_args(argv)?;
+    if parsed.global.help {
+        return print_help("jump-search");
+    }
+    if parsed.global.version {
+        return print_version();
+    }
+    prepare_connection_config(&parsed.global.config_path, &parsed.connection_name)?;
+    let configs = load_config_for_connection(&parsed.global.config_path, &parsed.connection_name)?;
+    let connection = find_connection(&configs, &parsed.connection_name)?;
+    let jump_config = connection
+        .jump_server
+        .as_ref()
+        .ok_or_else(|| {
+            AppError::new(format!(
+                "连接 {} 未配置 jumpServer，无法使用 jump-search",
+                connection.name
+            ))
+        })?;
+    if !jump_config.enabled {
+        return Err(AppError::new(format!(
+            "连接 {} 的 jumpServer.enabled 为 false，拒绝使用 jump-search",
+            connection.name
+        )));
+    }
+    let result = run_with_timeout(
+        jump_runtime_timeout_ms(parsed.total_timeout_ms),
+        search_jump_targets_async(
+            &configs,
+            connection,
+            jump_config,
+            &parsed.query,
+            parsed.idle_timeout_ms,
+            parsed.total_timeout_ms,
+        ),
+    )?;
+    if !result.is_empty() {
+        println!("{}", result);
+    }
+    Ok(())
 }
 
 fn run_jump_exec(argv: Vec<String>) -> AppResult<()> {
@@ -2395,20 +2677,24 @@ fn run_jump_exec(argv: Vec<String>) -> AppResult<()> {
     }
     let command = resolve_command_from_file_or_inline(&configs, &parsed.command, parsed.command_file.as_ref())?;
     validate_command(connection, &command)?;
-    // jump-exec currently prefers one-shot execution over daemon reuse.
-    // In practice, long-running/log-heavy JumpServer sessions are more reliable
-    // without the extra cached shell/channel layer.
-    let result = run_with_timeout(
-        parsed.timeout_ms,
-        execute_via_jumpserver_async(
-            &configs,
-            connection,
-            jump_config,
-            &parsed.target,
-            &command,
-            parsed.timeout_ms,
-        ),
-    )?;
+    let result = if parsed.global.no_cache {
+        run_with_timeout(
+            jump_runtime_timeout_ms(parsed.total_timeout_ms),
+            execute_via_jumpserver_async(
+                &configs,
+                connection,
+                jump_config,
+                &parsed.target,
+                &command,
+                CommandTimeouts {
+                    idle_timeout_ms: parsed.idle_timeout_ms,
+                    total_timeout_ms: parsed.total_timeout_ms,
+                },
+            ),
+        )?
+    } else {
+        request_daemon_jump_execute(&parsed, &command)?
+    };
     if !result.is_empty() {
         println!("{}", result);
     }
@@ -2453,24 +2739,33 @@ async fn expect_regex(
     channel: &mut Channel<client::Msg>,
     buffer: &mut String,
     pattern: &Regex,
-    timeout_ms: u64,
+    idle_timeout_ms: u64,
+    total_deadline: Option<tokio::time::Instant>,
     label: &str,
 ) -> AppResult<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
     loop {
         let cleaned = strip_ansi(buffer);
         if pattern.is_match(&cleaned) {
             return Ok(());
         }
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return Err(AppError::new(format!("等待 {} 超时", label)));
+        if let Some(deadline) = total_deadline {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(AppError::new(format!("等待 {} 达到总超时上限", label)));
+            }
         }
-        let remaining = deadline - now;
-        let msg = match tokio::time::timeout(remaining, channel.wait()).await {
+        let total_remaining = total_deadline.and_then(|deadline| {
+            let now = tokio::time::Instant::now();
+            (deadline > now).then_some(deadline - now)
+        });
+        let wait_budget = match total_remaining {
+            Some(remaining) => remaining.min(Duration::from_millis(idle_timeout_ms)),
+            None => Duration::from_millis(idle_timeout_ms),
+        };
+        let msg = match tokio::time::timeout(wait_budget, channel.wait()).await {
             Ok(Some(msg)) => msg,
             Ok(None) => return Err(AppError::new(format!("等待 {} 时跳板机连接关闭", label))),
-            Err(_) => return Err(AppError::new(format!("等待 {} 超时", label))),
+            Err(_) => return Err(AppError::new(format!("等待 {} 空闲超时", label))),
         };
         match msg {
             ChannelMsg::Data { data } => {
@@ -2487,23 +2782,33 @@ async fn expect_regex(
     }
 }
 
-fn remaining_timeout_ms(
-    deadline: tokio::time::Instant,
-    label: &str,
-) -> AppResult<u64> {
-    let now = tokio::time::Instant::now();
-    if now >= deadline {
-        return Err(AppError::new(format!("等待 {} 超时", label)));
-    }
-    Ok((deadline - now).as_millis().max(1) as u64)
+fn total_deadline_from_ms(total_timeout_ms: Option<u64>) -> Option<tokio::time::Instant> {
+    total_timeout_ms
+        .map(|timeout_ms| tokio::time::Instant::now() + Duration::from_millis(timeout_ms))
 }
 
-fn capped_timeout_ms(
-    deadline: tokio::time::Instant,
-    cap_ms: u64,
-    label: &str,
-) -> AppResult<u64> {
-    Ok(remaining_timeout_ms(deadline, label)?.min(cap_ms).max(1))
+fn remaining_before_deadline(deadline: tokio::time::Instant) -> Option<u64> {
+    let now = tokio::time::Instant::now();
+    Some(if deadline > now {
+        (deadline - now).as_millis().max(1) as u64
+    } else {
+        1
+    })
+}
+
+fn phase_timeout_ms(idle_timeout_ms: u64, total_deadline: Option<tokio::time::Instant>) -> u64 {
+    match total_deadline.and_then(remaining_before_deadline) {
+        Some(remaining_ms) => remaining_ms.min(idle_timeout_ms).max(1),
+        None => idle_timeout_ms,
+    }
+}
+
+fn command_runtime_timeout_ms(idle_timeout_ms: u64, total_timeout_ms: Option<u64>) -> u64 {
+    total_timeout_ms.unwrap_or(DAEMON_REQUEST_TIMEOUT_MS).max(idle_timeout_ms)
+}
+
+fn jump_runtime_timeout_ms(total_timeout_ms: Option<u64>) -> u64 {
+    total_timeout_ms.unwrap_or(DAEMON_REQUEST_TIMEOUT_MS)
 }
 
 /// 识别 bash 交互 shell 的 job control 通知行：
@@ -2568,6 +2873,9 @@ fn extract_marker_output(
         if trimmed.contains(HEARTBEAT_MARKER) {
             continue;
         }
+        if trimmed == EXEC_HEARTBEAT_MARKER {
+            continue;
+        }
         // bash 交互 shell 的 job control 通知 ("[1] 12345", "[1]+ Done ...", "[1]- Running ..."），
         // 这些行由 wrapper 的后台心跳/用户命令产生，不是真实业务输出，统一过滤。
         if is_job_control_notice(trimmed) {
@@ -2587,9 +2895,9 @@ async fn execute_via_jumpserver_async(
     jump: &JumpServerConfig,
     target: &str,
     command: &str,
-    overall_timeout_ms: u64,
+    timeouts: CommandTimeouts,
 ) -> AppResult<String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(overall_timeout_ms);
+    let total_deadline = total_deadline_from_ms(timeouts.total_timeout_ms);
     let session = connect_russh(configs, connection).await?;
     let result = execute_via_jumpserver_with_session(
         &session,
@@ -2597,11 +2905,64 @@ async fn execute_via_jumpserver_async(
         jump,
         target,
         command,
-        deadline,
+        timeouts.idle_timeout_ms,
+        total_deadline,
     )
     .await;
     let _ = tokio::time::timeout(
-        Duration::from_millis(overall_timeout_ms.min(5000)),
+        Duration::from_millis(phase_timeout_ms(timeouts.idle_timeout_ms.min(5000).max(1), total_deadline)),
+        session.disconnect(Disconnect::ByApplication, "", "English"),
+    )
+    .await;
+    result
+}
+
+async fn search_jump_targets_async(
+    configs: &[Connection],
+    connection: &Connection,
+    jump: &JumpServerConfig,
+    query: &str,
+    idle_timeout_ms: u64,
+    total_timeout_ms: Option<u64>,
+) -> AppResult<String> {
+    let total_deadline = total_deadline_from_ms(total_timeout_ms);
+    let session = connect_russh(configs, connection).await?;
+    let result = search_jump_targets_with_session(
+        &session,
+        connection,
+        jump,
+        query,
+        idle_timeout_ms,
+        total_deadline,
+    )
+    .await;
+    let _ = tokio::time::timeout(
+        Duration::from_millis(phase_timeout_ms(idle_timeout_ms.min(5000).max(1), total_deadline)),
+        session.disconnect(Disconnect::ByApplication, "", "English"),
+    )
+    .await;
+    result
+}
+
+async fn show_jump_menu_async(
+    configs: &[Connection],
+    connection: &Connection,
+    jump: &JumpServerConfig,
+    idle_timeout_ms: u64,
+    total_timeout_ms: Option<u64>,
+) -> AppResult<String> {
+    let total_deadline = total_deadline_from_ms(total_timeout_ms);
+    let session = connect_russh(configs, connection).await?;
+    let result = show_jump_menu_with_session(
+        &session,
+        connection,
+        jump,
+        idle_timeout_ms,
+        total_deadline,
+    )
+    .await;
+    let _ = tokio::time::timeout(
+        Duration::from_millis(phase_timeout_ms(idle_timeout_ms.min(5000).max(1), total_deadline)),
         session.disconnect(Disconnect::ByApplication, "", "English"),
     )
     .await;
@@ -2614,11 +2975,19 @@ async fn execute_via_jumpserver_with_session(
     jump: &JumpServerConfig,
     target: &str,
     command: &str,
-    deadline: tokio::time::Instant,
+    idle_timeout_ms: u64,
+    total_deadline: Option<tokio::time::Instant>,
 ) -> AppResult<String> {
     let (mut channel, mut buffer) =
-        setup_jump_channel(session, connection, jump, target, deadline).await?;
-    let result = run_jump_command(&mut channel, &mut buffer, command, deadline).await;
+        setup_jump_channel(session, connection, jump, target, idle_timeout_ms, total_deadline).await?;
+    let result = run_jump_command(
+        &mut channel,
+        &mut buffer,
+        command,
+        idle_timeout_ms,
+        total_deadline,
+    )
+    .await;
 
     // 退出目标 shell（best-effort）
     let _ = channel_send_line(&mut channel, "exit").await;
@@ -2630,14 +2999,13 @@ async fn execute_via_jumpserver_with_session(
     Ok(output)
 }
 
-/// 建立到目标主机的 PTY 通道并完成菜单/搜索进入流程，返回可复用的 channel + 输出 buffer。
-async fn setup_jump_channel(
+async fn open_jump_menu_channel(
     session: &client::Handle<RusshClient>,
     connection: &Connection,
     jump: &JumpServerConfig,
-    target: &str,
-    deadline: tokio::time::Instant,
-) -> AppResult<(Channel<client::Msg>, String)> {
+    idle_timeout_ms: u64,
+    total_deadline: Option<tokio::time::Instant>,
+) -> AppResult<(Channel<client::Msg>, String, Regex)> {
     let mut channel = session.channel_open_session().await.map_err(|error| {
         AppError::new(format!(
             "连接 {} 打开跳板机会话失败: {}",
@@ -2662,19 +3030,33 @@ async fn setup_jump_channel(
 
     let prompt_re = Regex::new(&jump.prompt_regex)
         .map_err(|error| AppError::new(format!("promptRegex 非法: {}", error)))?;
-    let shell_re = Regex::new(&jump.shell_prompt_regex)
-        .map_err(|error| AppError::new(format!("shellPromptRegex 非法: {}", error)))?;
 
     let mut buffer = String::new();
     expect_regex(
         &mut channel,
         &mut buffer,
         &prompt_re,
-        capped_timeout_ms(deadline, JUMP_MENU_PROMPT_MAX_MS, "JumpServer 菜单 prompt")?,
+        idle_timeout_ms.min(JUMP_MENU_PROMPT_MAX_MS).max(1),
+        total_deadline,
         "JumpServer 菜单 prompt",
     )
     .await?;
+    Ok((channel, buffer, prompt_re))
+}
 
+/// 建立到目标主机的 PTY 通道并完成菜单/搜索进入流程，返回可复用的 channel + 输出 buffer。
+async fn setup_jump_channel(
+    session: &client::Handle<RusshClient>,
+    connection: &Connection,
+    jump: &JumpServerConfig,
+    target: &str,
+    idle_timeout_ms: u64,
+    total_deadline: Option<tokio::time::Instant>,
+) -> AppResult<(Channel<client::Msg>, String)> {
+    let (mut channel, mut buffer, _) =
+        open_jump_menu_channel(session, connection, jump, idle_timeout_ms, total_deadline).await?;
+    let shell_re = Regex::new(&jump.shell_prompt_regex)
+        .map_err(|error| AppError::new(format!("shellPromptRegex 非法: {}", error)))?;
     // 进入目标主机
     buffer.clear();
     channel_send_slow(&mut channel, target, jump.char_delay_ms).await?;
@@ -2682,7 +3064,8 @@ async fn setup_jump_channel(
         &mut channel,
         &mut buffer,
         &shell_re,
-        capped_timeout_ms(deadline, JUMP_DIRECT_ATTEMPT_MAX_MS, "目标主机 shell prompt (direct)")?,
+        idle_timeout_ms.min(JUMP_DIRECT_ATTEMPT_MAX_MS).max(1),
+        total_deadline,
         "目标主机 shell prompt (direct)",
     )
     .await;
@@ -2703,7 +3086,8 @@ async fn setup_jump_channel(
             &mut channel,
             &mut buffer,
             &shell_re,
-            remaining_timeout_ms(deadline, "目标主机 shell prompt (search)")?,
+            idle_timeout_ms,
+            total_deadline,
             "目标主机 shell prompt (search)",
         )
         .await;
@@ -2713,13 +3097,121 @@ async fn setup_jump_channel(
                 &mut channel,
                 &mut buffer,
                 &shell_re,
-                remaining_timeout_ms(deadline, "目标主机 shell prompt (search 二次回车)")?,
+                idle_timeout_ms,
+                total_deadline,
                 "目标主机 shell prompt (search 二次回车)",
             )
             .await?;
         }
     }
     Ok((channel, buffer))
+}
+
+fn build_jump_search_text(query: &str, search_prefix: &str) -> String {
+    let trimmed = query.trim();
+    if search_prefix.is_empty() || trimmed.starts_with(search_prefix) {
+        trimmed.to_string()
+    } else {
+        format!("{}{}", search_prefix, trimmed)
+    }
+}
+
+fn extract_jump_search_output(
+    buffer: &str,
+    search_text: &str,
+    prompt_re: &Regex,
+) -> AppResult<String> {
+    let cleaned = strip_ansi(buffer);
+    let mut lines = Vec::new();
+    for raw_line in cleaned.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if prompt_re.is_match(trimmed) {
+            continue;
+        }
+        if trimmed == search_text {
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+    let output = lines.join("\n").trim().to_string();
+    if output.is_empty() {
+        return Err(AppError::new("JumpServer 搜索未返回可识别的候选结果"));
+    }
+    Ok(output)
+}
+
+fn extract_jump_menu_output(buffer: &str, prompt_re: &Regex) -> AppResult<String> {
+    let cleaned = strip_ansi(buffer);
+    let mut lines = Vec::new();
+    for raw_line in cleaned.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if prompt_re.is_match(trimmed) {
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+    let output = lines.join("\n").trim().to_string();
+    if output.is_empty() {
+        return Err(AppError::new("JumpServer 菜单未返回可识别内容"));
+    }
+    Ok(output)
+}
+
+async fn show_jump_menu_with_session(
+    session: &client::Handle<RusshClient>,
+    connection: &Connection,
+    jump: &JumpServerConfig,
+    idle_timeout_ms: u64,
+    total_deadline: Option<tokio::time::Instant>,
+) -> AppResult<String> {
+    let (_channel, buffer, prompt_re) =
+        open_jump_menu_channel(session, connection, jump, idle_timeout_ms, total_deadline).await?;
+    extract_jump_menu_output(&buffer, &prompt_re)
+}
+
+async fn search_jump_targets_with_session(
+    session: &client::Handle<RusshClient>,
+    connection: &Connection,
+    jump: &JumpServerConfig,
+    query: &str,
+    idle_timeout_ms: u64,
+    total_deadline: Option<tokio::time::Instant>,
+) -> AppResult<String> {
+    let (mut channel, mut buffer, prompt_re) =
+        open_jump_menu_channel(session, connection, jump, idle_timeout_ms, total_deadline).await?;
+    let search_text = build_jump_search_text(query, &jump.search_prefix);
+    buffer.clear();
+    channel_send_slow(&mut channel, &search_text, jump.char_delay_ms).await?;
+    let first = expect_regex(
+        &mut channel,
+        &mut buffer,
+        &prompt_re,
+        idle_timeout_ms,
+        total_deadline,
+        "JumpServer 搜索结果",
+    )
+    .await;
+    if first.is_err() {
+        channel_send_line(&mut channel, "").await?;
+        expect_regex(
+            &mut channel,
+            &mut buffer,
+            &prompt_re,
+            idle_timeout_ms,
+            total_deadline,
+            "JumpServer 搜索结果（二次回车）",
+        )
+        .await?;
+    }
+    extract_jump_search_output(&buffer, &search_text, &prompt_re)
 }
 
 /// 在已经进入目标 shell 的 channel 上发送 marker-wrapped 命令并解析结果。
@@ -2730,7 +3222,8 @@ async fn run_jump_command(
     channel: &mut Channel<client::Msg>,
     buffer: &mut String,
     command: &str,
-    deadline: tokio::time::Instant,
+    idle_timeout_ms: u64,
+    total_deadline: Option<tokio::time::Instant>,
 ) -> AppResult<(String, i32)> {
     // 发送 marker 包装命令
     let start_marker = format!("__JUMP_START_{}__", uuid_hex());
@@ -2740,10 +3233,11 @@ async fn run_jump_command(
     // - `set +m` 关闭 shell job control，避免 [1] pid / Done 等异步任务提示泄漏到 stdout。
     // - 心跳必须打到 stdout 才能让 JumpServer 看见字节流，这里只过滤标识行而不重定向。
     // - 用 `\\$!` 等通过外层 format 输出 `$!` 进入 shell，由 shell 自身展开。
+    let wrapped_command = wrap_command_with_heartbeat(command, EXEC_HEARTBEAT_MARKER);
     let wrapped = format!(
         "{{ set +m; printf '{start}\\n'; ( {cmd} ) & __jhpid=$!; ( while kill -0 $__jhpid 2>/dev/null; do printf '{hb}\\n'; sleep 20; done ) & __jhhb=$!; wait $__jhpid 2>/dev/null; __jhstatus=$?; kill $__jhhb >/dev/null 2>&1; wait $__jhhb >/dev/null 2>&1; printf '\\n{end}:%s\\n' \"$__jhstatus\"; }} 2>&1",
         start = start_marker,
-        cmd = command,
+        cmd = wrapped_command,
         hb = HEARTBEAT_MARKER,
         end = end_marker,
     );
@@ -2757,7 +3251,8 @@ async fn run_jump_command(
         channel,
         buffer,
         &end_pattern,
-        remaining_timeout_ms(deadline, "命令执行结果")?,
+        idle_timeout_ms,
+        total_deadline,
         "命令执行结果",
     )
     .await?;
@@ -2772,6 +3267,16 @@ fn format_exit_failure(output: &str, exit_code: i32) -> String {
     }
     parts.push(format!("[exit code] {}", exit_code));
     parts.join("\n")
+}
+
+fn strip_exec_heartbeat_lines(output: &str) -> String {
+    output
+        .lines()
+        .filter(|line| line.trim() != EXEC_HEARTBEAT_MARKER)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 fn uuid_hex() -> String {
@@ -2793,8 +3298,6 @@ fn default_jump_blacklist() -> Vec<serde_json::Value> {
         r"(^|[;&|()\s])shutdown(\s|$)",
         r"(^|[;&|()\s])systemctl\s+(stop|restart|reload)(\s|$)",
         r"(^|[;&|()\s])kill(\s|$)",
-        ">",
-        ">>",
     ]
     .iter()
     .map(|s| serde_json::Value::String((*s).to_string()))
@@ -2818,7 +3321,7 @@ fn build_jump_server_entry(
         "jumpServer": {
             "enabled": true,
             "promptRegex": "Opt>\\s*$",
-            "shellPromptRegex": "(?m)[#$>]\\s*$",
+            "shellPromptRegex": "(?m)[#$]\\s*$",
             "searchPrefix": "/",
             "charDelayMs": 60,
             "enterStrategy": "direct-then-search",
@@ -2947,7 +3450,8 @@ fn run_add_jump_server(argv: Vec<String>) -> AppResult<()> {
         name,
         config_path.display()
     );
-    println!("现在可执行: agentsshcli jump-exec {} --target <hostOrIp> \"<command>\"", name);
+    println!("下一步建议先执行: agentsshcli jump-menu {}", name);
+    println!("确认 Opt 菜单后，再执行: agentsshcli jump-exec {} --target <hostOrIp> \"<command>\"", name);
     Ok(())
 }
 
@@ -2996,6 +3500,8 @@ mod tests {
         assert!(!parsed.global.no_cache);
         assert_eq!(parsed.connection_name, "server");
         assert_eq!(parsed.command, "pwd");
+        assert_eq!(parsed.idle_timeout_ms, 30000);
+        assert_eq!(parsed.total_timeout_ms, None);
     }
 
     #[test]
@@ -3013,8 +3519,26 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.connection_name, "server");
         assert_eq!(parsed.command, "pwd");
-        assert_eq!(parsed.timeout_ms, 1000);
+        assert_eq!(parsed.idle_timeout_ms, 1000);
+        assert_eq!(parsed.total_timeout_ms, None);
         assert_eq!(parsed.pty, Some(true));
+    }
+
+    #[test]
+    fn parse_exec_supports_total_timeout() {
+        let parsed = parse_execute_args(vec![
+            "--connection".into(),
+            "server".into(),
+            "--command".into(),
+            "pwd".into(),
+            "--timeout".into(),
+            "1000".into(),
+            "--total-timeout".into(),
+            "20000".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.idle_timeout_ms, 1000);
+        assert_eq!(parsed.total_timeout_ms, Some(20000));
     }
 
     #[test]
@@ -3211,7 +3735,7 @@ mod tests {
               "jumpServer":{
                 "enabled":true,
                 "promptRegex":"Opt>\\s*$",
-                "shellPromptRegex":"(?m)[#$>]\\s*$",
+                "shellPromptRegex":"(?m)[#$]\\s*$",
                 "searchPrefix":"/",
                 "charDelayMs":40,
                 "enterStrategy":"direct-then-search"
@@ -3221,9 +3745,39 @@ mod tests {
         let configs = load_config(&path).unwrap();
         let jump = configs[0].jump_server.as_ref().unwrap();
         assert!(jump.enabled);
+        assert_eq!(jump.shell_prompt_regex, "(?m)[#$]\\s*$");
         assert_eq!(jump.search_prefix, "/");
         assert_eq!(jump.char_delay_ms, 40);
         assert_eq!(jump.enter_strategy, "direct-then-search");
+    }
+
+    #[test]
+    fn jump_menu_rejects_connection_without_jumpserver_enabled() {
+        let (_dir, path) = write_config(
+            r#"[{"name":"plain","host":"127.0.0.1","username":"root","password":"p"}]"#,
+        );
+        let err = run_jump_menu(vec![
+            "--config".into(),
+            path.to_string_lossy().into(),
+            "plain".into(),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("未配置 jumpServer"));
+    }
+
+    #[test]
+    fn jump_search_rejects_connection_without_jumpserver_enabled() {
+        let (_dir, path) = write_config(
+            r#"[{"name":"plain","host":"127.0.0.1","username":"root","password":"p"}]"#,
+        );
+        let err = run_jump_search(vec![
+            "--config".into(),
+            path.to_string_lossy().into(),
+            "plain".into(),
+            "adserving".into(),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("未配置 jumpServer"));
     }
 
     #[test]
@@ -3278,6 +3832,103 @@ mod tests {
         assert_eq!(parsed.target, "host1");
         assert_eq!(parsed.command_file.as_deref(), Some("script.sh"));
         assert_eq!(parsed.command, "");
+    }
+
+    #[test]
+    fn parse_jump_exec_defaults_to_cached_mode() {
+        let parsed = parse_jump_exec_args(vec![
+            "gw".into(),
+            "--target".into(),
+            "host1".into(),
+            "pwd".into(),
+        ])
+        .unwrap();
+        assert!(!parsed.global.no_cache);
+        assert_eq!(parsed.connection_name, "gw");
+        assert_eq!(parsed.target, "host1");
+        assert_eq!(parsed.command, "pwd");
+        assert_eq!(parsed.idle_timeout_ms, 60000);
+        assert_eq!(parsed.total_timeout_ms, None);
+    }
+
+    #[test]
+    fn parse_jump_menu_defaults() {
+        let parsed = parse_jump_menu_args(vec!["gw".into()]).unwrap();
+        assert_eq!(parsed.connection_name, "gw");
+        assert_eq!(parsed.idle_timeout_ms, 15000);
+        assert_eq!(parsed.total_timeout_ms, None);
+    }
+
+    #[test]
+    fn parse_jump_search_defaults() {
+        let parsed = parse_jump_search_args(vec!["gw".into(), "adserving".into()]).unwrap();
+        assert_eq!(parsed.connection_name, "gw");
+        assert_eq!(parsed.query, "adserving");
+        assert_eq!(parsed.idle_timeout_ms, 15000);
+        assert_eq!(parsed.total_timeout_ms, None);
+    }
+
+    #[test]
+    fn parse_jump_search_supports_named_query() {
+        let parsed = parse_jump_search_args(vec![
+            "--connection".into(),
+            "gw".into(),
+            "--query".into(),
+            "api-02".into(),
+            "--timeout".into(),
+            "20000".into(),
+            "--total-timeout".into(),
+            "90000".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.connection_name, "gw");
+        assert_eq!(parsed.query, "api-02");
+        assert_eq!(parsed.idle_timeout_ms, 20000);
+        assert_eq!(parsed.total_timeout_ms, Some(90000));
+    }
+
+    #[test]
+    fn parse_jump_exec_supports_no_cache() {
+        let parsed = parse_jump_exec_args(vec![
+            "--no-cache".into(),
+            "gw".into(),
+            "--target".into(),
+            "host1".into(),
+            "pwd".into(),
+        ])
+        .unwrap();
+        assert!(parsed.global.no_cache);
+    }
+
+    #[test]
+    fn parse_jump_exec_supports_cache_ttl() {
+        let parsed = parse_jump_exec_args(vec![
+            "--cache-ttl".into(),
+            "60000".into(),
+            "gw".into(),
+            "--target".into(),
+            "host1".into(),
+            "pwd".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.global.cache_ttl_ms, Some(60000));
+    }
+
+    #[test]
+    fn parse_jump_exec_supports_total_timeout() {
+        let parsed = parse_jump_exec_args(vec![
+            "--timeout".into(),
+            "15000".into(),
+            "--total-timeout".into(),
+            "180000".into(),
+            "gw".into(),
+            "--target".into(),
+            "host1".into(),
+            "pwd".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.idle_timeout_ms, 15000);
+        assert_eq!(parsed.total_timeout_ms, Some(180000));
     }
 
     #[test]
@@ -3342,6 +3993,32 @@ mod tests {
             .unwrap();
         assert_eq!(code, 0);
         assert_eq!(out, "hello");
+    }
+
+    #[test]
+    fn extract_jump_menu_output_filters_prompt_lines() {
+        let prompt = Regex::new(r"Opt>\s*$").unwrap();
+        let out = extract_jump_menu_output(
+            "欢迎使用 JumpServer\n1) 输入 /关键词 搜索\n2) 输入 p 查看节点\nOpt>\n",
+            &prompt,
+        )
+        .unwrap();
+        assert_eq!(out, "欢迎使用 JumpServer\n1) 输入 /关键词 搜索\n2) 输入 p 查看节点");
+    }
+
+    #[test]
+    fn extract_jump_search_output_filters_prompt_lines() {
+        let prompt = Regex::new(r"Opt>\s*$").unwrap();
+        let out = extract_jump_search_output(
+            "Opt> /adserving\n1) hwtf-adserving-api-01 172.31.1.10\n2) hwtf-adserving-api-02 172.31.1.11\nOpt>\n",
+            "/adserving",
+            &prompt,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            "Opt> /adserving\n1) hwtf-adserving-api-01 172.31.1.10\n2) hwtf-adserving-api-02 172.31.1.11"
+        );
     }
 
     #[test]
@@ -3478,6 +4155,7 @@ struct DaemonRequest {
     command: Option<String>,
     directory: Option<String>,
     timeout: Option<u64>,
+    total_timeout: Option<u64>,
     local_path: Option<String>,
     remote_path: Option<String>,
     cache_ttl_ms: Option<u64>,
@@ -3569,9 +4247,27 @@ fn request_daemon_execute(parsed: &ExecuteArgs, command: &str) -> AppResult<Stri
         "connectionName": parsed.connection_name,
         "command": command,
         "directory": parsed.directory,
-        "timeout": parsed.timeout_ms,
+        "timeout": parsed.idle_timeout_ms,
+        "totalTimeout": parsed.total_timeout_ms,
         "cacheTtlMs": cache_ttl(&parsed.global),
         "pty": parsed.pty,
+    });
+    let response = request_daemon(&config_path, &request)?;
+    Ok(response.stdout.unwrap_or_default())
+}
+
+fn request_daemon_jump_execute(parsed: &JumpExecArgs, command: &str) -> AppResult<String> {
+    let config_path = path_absolute(&parsed.global.config_path)?;
+    let request = serde_json::json!({
+        "operation": "jumpExecute",
+        "configPath": config_path,
+        "cwd": env::current_dir()?,
+        "connectionName": parsed.connection_name,
+        "command": command,
+        "target": parsed.target,
+        "timeout": parsed.idle_timeout_ms,
+        "totalTimeout": parsed.total_timeout_ms,
+        "cacheTtlMs": cache_ttl(&parsed.global),
     });
     let response = request_daemon(&config_path, &request)?;
     Ok(response.stdout.unwrap_or_default())
@@ -4096,9 +4792,11 @@ fn handle_daemon_stream<S: Read + Write>(
     }
 
     let key = build_connection_key(bound_config_path, &state.configs, &connection);
+    let idle_timeout_ms = request.timeout.unwrap_or(30000);
+    let total_timeout_ms = request.total_timeout;
     if !state.connections.contains_key(&key) {
         let session = state.run_with_timeout(
-            request.timeout.unwrap_or(30000),
+            idle_timeout_ms,
             connect_russh(&state.configs, &connection),
         )?;
         state.connections.insert(
@@ -4128,19 +4826,24 @@ fn handle_daemon_stream<S: Read + Write>(
                 None => command,
             };
             let pty = resolve_pty(&connection, request.pty);
+            let timeouts = CommandTimeouts {
+                idle_timeout_ms,
+                total_timeout_ms,
+            };
             let stdout_result = state.run_with_timeout(
-                request.timeout.unwrap_or(30000),
+                command_runtime_timeout_ms(timeouts.idle_timeout_ms, timeouts.total_timeout_ms),
                 execute_remote_command_with_session_async(
                     &entry.session,
                     &connection,
                     &remote_command,
                     pty,
+                    timeouts,
                 ),
             );
             let stdout = match stdout_result {
                 Ok(stdout) => stdout,
                 Err(error) => {
-                    let _ = state.run_with_timeout(request.timeout.unwrap_or(30000), async {
+                    let _ = state.run_with_timeout(timeouts.idle_timeout_ms.min(5000).max(1000), async {
                         entry
                             .session
                             .disconnect(Disconnect::ByApplication, "", "English")
@@ -4150,17 +4853,18 @@ fn handle_daemon_stream<S: Read + Write>(
                             })
                     });
                     let session = state.run_with_timeout(
-                        request.timeout.unwrap_or(30000),
+                        timeouts.idle_timeout_ms,
                         connect_russh(&state.configs, &connection),
                     )?;
                     let stdout = state
                         .run_with_timeout(
-                            request.timeout.unwrap_or(30000),
+                            command_runtime_timeout_ms(timeouts.idle_timeout_ms, timeouts.total_timeout_ms),
                             execute_remote_command_with_session_async(
                                 &session,
                                 &connection,
                                 &remote_command,
                                 pty,
+                                timeouts,
                             ),
                         )
                         .map_err(|retry_error| {
@@ -4318,22 +5022,30 @@ fn handle_jump_execute(
     }
 
     let key = build_jump_connection_key(bound_config_path, connection, &jump, target);
-    let timeout_ms = request.timeout.unwrap_or(30000);
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let idle_timeout_ms = request.timeout.unwrap_or(30000);
+    let total_timeout_ms = request.total_timeout;
+    let total_deadline = total_deadline_from_ms(total_timeout_ms);
+    let command_runtime_timeout_ms = command_runtime_timeout_ms(idle_timeout_ms, total_timeout_ms);
 
     // Pop existing entry if any, attempt to run command on it.
     let existing = state.jump_connections.remove(&key);
     let cached_hit = existing.is_some();
     let mut entry = match existing {
         Some(entry) => entry,
-        None => build_jump_entry(connection, &jump, target, ttl_ms, timeout_ms, state)?,
+        None => build_jump_entry(connection, &jump, target, ttl_ms, idle_timeout_ms, total_timeout_ms, state)?,
     };
 
     // Run command on the (possibly cached) channel.
     // 仅在 channel/marker 层面的错误才丢弃缓存；命令业务非零退出 (exit_code != 0) 不应让缓存失效。
     let run_result = state.run_with_timeout(
-        timeout_ms,
-        run_jump_command(&mut entry.channel, &mut entry.buffer, command, deadline),
+        command_runtime_timeout_ms,
+        run_jump_command(
+            &mut entry.channel,
+            &mut entry.buffer,
+            command,
+            idle_timeout_ms,
+            total_deadline,
+        ),
     );
 
     let (output, exit_code) = match run_result {
@@ -4343,7 +5055,7 @@ fn handle_jump_execute(
             if !cached_hit {
                 return Err(error);
             }
-            let _ = state.run_with_timeout(timeout_ms.min(5000).max(1000), async {
+            let _ = state.run_with_timeout(idle_timeout_ms.min(5000).max(1000), async {
                 entry
                     .session
                     .disconnect(Disconnect::ByApplication, "", "English")
@@ -4351,11 +5063,17 @@ fn handle_jump_execute(
                     .map_err(|err| AppError::new(format!("断开失效跳板缓存失败: {}", err)))
             });
             let mut fresh =
-                build_jump_entry(connection, &jump, target, ttl_ms, timeout_ms, state)?;
+                build_jump_entry(connection, &jump, target, ttl_ms, idle_timeout_ms, total_timeout_ms, state)?;
             let retry = state
                 .run_with_timeout(
-                    timeout_ms,
-                    run_jump_command(&mut fresh.channel, &mut fresh.buffer, command, deadline),
+                    command_runtime_timeout_ms,
+                    run_jump_command(
+                        &mut fresh.channel,
+                        &mut fresh.buffer,
+                        command,
+                        idle_timeout_ms,
+                        total_deadline,
+                    ),
                 )
                 .map_err(|retry_err| {
                     AppError::new(format!("{}；已重连重试仍失败: {}", error, retry_err))
@@ -4385,19 +5103,23 @@ fn build_jump_entry(
     jump: &JumpServerConfig,
     target: &str,
     ttl_ms: u64,
-    timeout_ms: u64,
+    idle_timeout_ms: u64,
+    total_timeout_ms: Option<u64>,
     state: &DaemonState,
 ) -> AppResult<JumpPoolEntry> {
-    let session = state.run_with_timeout(timeout_ms, connect_russh(&state.configs, connection))?;
+    let runtime_timeout_ms = jump_runtime_timeout_ms(total_timeout_ms);
+    let total_deadline = total_deadline_from_ms(total_timeout_ms);
+    let session = state.run_with_timeout(runtime_timeout_ms, connect_russh(&state.configs, connection))?;
     let (channel, buffer) =
         state.run_with_timeout(
-            timeout_ms,
+            phase_timeout_ms(idle_timeout_ms, total_deadline),
             setup_jump_channel(
                 &session,
                 connection,
                 jump,
                 target,
-                tokio::time::Instant::now() + Duration::from_millis(timeout_ms),
+                idle_timeout_ms,
+                total_deadline,
             ),
         )?;
     Ok(JumpPoolEntry {

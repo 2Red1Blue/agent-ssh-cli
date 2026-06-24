@@ -12,7 +12,7 @@
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node.js >=18"></a>
   <a href="https://www.npmjs.com/"><img src="https://img.shields.io/badge/npm-%3E%3D8-CB3837?logo=npm&logoColor=white" alt="npm >=8"></a>
   <a href="https://github.com/2Red1Blue/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.3-blue" alt="release v0.1.3"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.4-blue" alt="release v0.1.4"></a>
   <a href="https://github.com/2Red1Blue/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
@@ -95,9 +95,43 @@ agentsshcli install-ai --interactive
 - `agent-ssh-cli`：负责 JumpServer / SSH 执行
 - `log-analyze`：负责环境识别、target 映射、日志排查流程
 
+如果后续仓库升级了 `log-analyze` 模板，而你本地也补充过私有规则，推荐先检查再兼容更新：
+
+```bash
+agentsshcli doctor-skills
+agentsshcli sync-skills
+```
+
+`sync-skills` 默认会尽量保留你本地补充的内容，并备份当前 `SKILL.md`；`env-map.md` 和私有配置不会被覆盖。
+
 首次安装后，如果要让 AI 交互式补齐你自己的环境映射，请参考：
 
 - [docs/AI_FIRST_RUN_LOG_ANALYZE.md](docs/AI_FIRST_RUN_LOG_ANALYZE.md)
+
+如果你已经完成 `install-ai`，推荐按这个顺序走：
+
+- 安装阶段让 AI 处理：装 CLI、装 skills、初始化 JumpServer 配置
+- SSH 配好后第一步先 `agentsshcli jump-menu <jumpserver-connection>`，展示当前 JumpServer 的 `Opt>` 菜单
+- 然后你只需要告诉 AI：要添加哪些常用主机、别名有哪些、日志目录在哪里
+- 剩下的主机搜索、真实 hostname/IP 验证、以及 `env-map.md` 回填，都交给你当前正在使用的 AI 完成
+
+`env-map.md` 建议由 AI 自行维护，而不是要求用户长期手工编辑。这个文件本质上是 AI 的本地环境记忆：
+
+- 用户提供：常用主机、简称/别名、日志目录
+- AI 负责：JumpServer 菜单确认、真实主机搜索、验证、写入和后续更新
+
+如果你是在 AI 对话里继续做这一步，推荐让 AI 先做两件事：
+
+- 先直接告诉你“当前主链 `env-map.md` 的真实路径”
+- 先执行 `agentsshcli jump-menu <jumpserver-connection>`，把当前 `Opt>` 菜单完整展示给你
+
+然后再继续补这些信息：
+
+- 要添加哪些常用主机
+- 这些主机或项目有哪些简称 / 别名
+- 这些项目日志通常在哪个目录
+
+这样用户不会卡在“文件到底在哪”，也不会在还没看到 JumpServer 菜单前就被要求提供 hostname；`env-map.md` 的维护动作则由 AI 自己完成。
 
 ## 手动安装
 ### 环境要求
@@ -244,26 +278,36 @@ agentsshcli list
 agentsshcli exec --no-cache 密码服务器 "pwd"
 agentsshcli exec --pty 密码服务器 "tty"
 agentsshcli exec 密码服务器 --command-file ./script.sh --timeout 60000
+agentsshcli exec 密码服务器 "tail -f /tmp/demo.log" --timeout 10000 --total-timeout 300000
 ```
 完成安装!
 
 ## JumpServer 跳板机模式
 
-`jump-exec` 子命令支持通过 JumpServer 跳板机以菜单 PTY 模式登入目标主机执行命令，
+`jump-search` / `jump-exec` 子命令支持通过 JumpServer 跳板机菜单先搜主机，再登入目标主机执行命令，
 适用于线上服务器只能经堡垒机访问的场景。原有 `exec / upload / download` 直连行为
 完全不变；JumpServer 模式由连接配置中的 `jumpServer` 字段开启。
 
 ### 命令格式
 
 ```bash
-agentsshcli jump-exec <gatewayConnection> --target <hostOrIp> "<command>" [--timeout <ms>]
+agentsshcli jump-search <gatewayConnection> "<query>" [--timeout <ms>] [--total-timeout <ms>]
+agentsshcli jump-exec <gatewayConnection> --target <hostOrIp> "<command>" [--timeout <ms>] [--total-timeout <ms>]
 ```
 
+- `jump-search`：只在 JumpServer 菜单层搜索当前账号有权限的主机候选，不进入目标机 shell
 - `<gatewayConnection>`：在 `config.json` 中配置了 `jumpServer.enabled=true` 的连接名
 - `--target`：目标机器 hostname 或 IP（JumpServer 菜单会用它做搜索）
-- `--timeout`：可选，默认 60000ms。命令执行阶段沿用此预算，遇到高负载机器可调大；如果要扫整天归档日志，通常建议直接提高到 `120000~300000`
+- `--timeout`：可选，默认 60000ms。表示空闲超时；只要远端持续输出，等待会自动续期
+- `--total-timeout`：可选。整次 jump-exec 的硬上限；默认不设总上限
 
-> 当前 `jump-exec` 只支持正整数毫秒超时，不支持“无超时”；整天大日志检索更推荐先缩小时段、缩小文件，再配合更长 `--timeout`。
+当用户只给了 `myservice-api`、`api-02`、实例尾号、IP 片段这类模糊线索时，推荐固定流程：
+
+1. 先 `jump-search` 搜出真实 hostname / IP
+2. 把“用户简称 -> 真实 hostname / IP”写回 `env-map.md`
+3. 再用 `jump-exec --target <真实目标>` 做验证或查日志
+
+> 当前 `jump-exec` 和普通 `exec` 都只支持正整数毫秒超时，不支持“无超时”。如需查整天大日志，推荐把 `--timeout` 提高到 `120000~300000`，必要时再加 `--total-timeout` 作为总保护上限。
 
 > upload / download 不支持 JumpServer 模式，请改用直连。
 
@@ -275,10 +319,10 @@ agentsshcli jump-exec <gatewayConnection> --target <hostOrIp> "<command>" [--tim
 ```bash
 agentsshcli add-jump-server \
   --name prod.jumpserver \
-  --host 39.108.163.91 \
-  --port 8390 \
-  --username liuzx \
-  --private-key /Users/liuzx/Downloads/liuzx-jumpserver.pem
+  --host jump.example.com \
+  --port 2222 \
+  --username <your-user> \
+  --private-key /path/to/jumpserver.pem
 ```
 
 子命令会自动填入：
@@ -286,9 +330,9 @@ agentsshcli add-jump-server \
 - `pty: true`
 - `jumpServer.enabled: true`
 - `jumpServer.promptRegex: "Opt>\\s*$"`（标准 JumpServer 菜单 prompt）
-- `jumpServer.shellPromptRegex: "(?m)[#$>]\\s*$"`
+- `jumpServer.shellPromptRegex: "(?m)[#$]\\s*$"`
 - `jumpServer.searchPrefix: "/"`、`charDelayMs: 60`、`enterStrategy: "direct-then-search"`
-- 默认 `commandBlacklist`（拒绝 `rm` / `truncate` / `reboot` / `shutdown` / `systemctl stop|restart|reload` / `kill` / `>` / `>>`）
+- 默认 `commandBlacklist`（拒绝 `rm` / `truncate` / `reboot` / `shutdown` / `systemctl stop|restart|reload` / `kill`）
 
 文件不存在会自动创建，权限置为 `0600`。同名连接已存在时报错；加 `--force` 覆盖。
 
@@ -311,9 +355,11 @@ agentsshcli add-jump-server \
   agentsshcli add-jump-server --name <name> --host <host> --port <port> \
     --username <user> --private-key <key>
 
-写入后用以下命令验证：
-  agentsshcli list
-  agentsshcli jump-exec <name> --target <一个已知的目标主机> "hostname"
+	写入后用以下命令验证：
+	  agentsshcli list
+	  agentsshcli jump-menu <name>
+	  agentsshcli jump-search <name> "adserving-api"
+	  agentsshcli jump-exec <name> --target <一个已知的目标主机> "hostname"
 ```
 
 ### 手动编辑配置（不推荐）
@@ -323,15 +369,15 @@ agentsshcli add-jump-server \
 ```json
 {
   "name": "prod.jumpserver",
-  "host": "39.108.163.91",
-  "port": 8390,
-  "username": "liuzx",
-  "privateKey": "/Users/liuzx/Downloads/liuzx-jumpserver.pem",
+  "host": "jump.example.com",
+  "port": 2222,
+  "username": "<your-user>",
+  "privateKey": "/path/to/jumpserver.pem",
   "pty": true,
   "jumpServer": {
     "enabled": true,
     "promptRegex": "Opt>\\s*$",
-    "shellPromptRegex": "(?m)[#$>]\\s*$",
+    "shellPromptRegex": "(?m)[#$]\\s*$",
     "searchPrefix": "/",
     "charDelayMs": 60,
     "enterStrategy": "direct-then-search"
@@ -342,12 +388,12 @@ agentsshcli add-jump-server \
     "(^|[;&|()\\s])reboot(\\s|$)",
     "(^|[;&|()\\s])shutdown(\\s|$)",
     "(^|[;&|()\\s])systemctl\\s+(stop|restart|reload)(\\s|$)",
-    "(^|[;&|()\\s])kill(\\s|$)",
-    ">",
-    ">>"
+    "(^|[;&|()\\s])kill(\\s|$)"
   ]
 }
 ```
+
+如果你们团队希望连重定向、覆盖写入也一起禁止，可以再手工把 `>` / `>>` 追加到 `commandBlacklist`。
 
 `jumpServer` 字段说明：
 
@@ -355,7 +401,7 @@ agentsshcli add-jump-server \
 |---|---|---|
 | `enabled` | 必填 | 必须为 `true`，`jump-exec` 才允许使用该连接 |
 | `promptRegex` | `Opt>\\s*$` | 网关菜单 prompt 正则 |
-| `shellPromptRegex` | `(?m)[#$>]\\s*$` | 进入目标后 shell prompt 正则 |
+| `shellPromptRegex` | `(?m)[#$]\\s*$` | 进入目标后 shell prompt 正则；默认不把 `>` 当作 shell prompt，避免把 JumpServer 的 `Opt>` 菜单误判成已进入目标机 |
 | `searchPrefix` | `/` | 搜索模式前缀（菜单输入 `/<hostname>` 触发搜索） |
 | `charDelayMs` | 60 | 慢速发送字符延迟（毫秒），防止菜单丢字 |
 | `enterStrategy` | `direct-then-search` | `direct` = 只直接发 target；`direct-then-search` = 先直接发，超时再走搜索模式 |
@@ -363,21 +409,24 @@ agentsshcli add-jump-server \
 ### 使用示例
 
 ```bash
+# 先按简称搜索真实主机
+agentsshcli jump-search prod.jumpserver "app-api"
+
 # 单机
-agentsshcli jump-exec prod.jumpserver --target hwtf-adserving-api-02 "hostname && uptime"
+agentsshcli jump-exec prod.jumpserver --target app-api-02 "hostname && uptime"
 
 # 多机循环
-for host in hwtf-adserving-api-01 hwtf-adserving-api-02; do
+for host in app-api-01 app-api-02; do
   echo "=== $host ==="
   agentsshcli jump-exec prod.jumpserver --target $host "uptime"
 done
 
 # 拉日志最近 50 行
-agentsshcli jump-exec prod.jumpserver --target hwtf-adserving-api-02 \
-  "tail -50 /www/hw-adserving-api/logs/app.log"
+agentsshcli jump-exec prod.jumpserver --target app-api-02 \
+  "tail -50 /www/app-api/logs/info.log"
 
 # test 环境（IP 目标）
-agentsshcli jump-exec test.jumpserver --target dz0-153 "hostname"
+agentsshcli jump-exec test.jumpserver --target 10.0.0.53 "hostname"
 ```
 
 ### 限制
@@ -385,7 +434,8 @@ agentsshcli jump-exec test.jumpserver --target dz0-153 "hostname"
 - 仅支持 PEM 私钥认证（不支持密码、不支持 passphrase 加密的私钥）
 - `upload` / `download` 不支持 JumpServer 模式（PTY 菜单环境无法保证 SFTP 通道）
 - 默认 PTY 宽度 200，防止长行被折叠破坏 marker 检测
-- 命令执行阶段超时跟随 `--timeout`（最低 10s），遇到高负载机器请调大
+- 默认按“空闲超时”处理；只要命令持续输出，`--timeout` 会自动续期
+- 如需限制整次执行最长时长，可显式增加 `--total-timeout`
 
 ## 卸载和清理
 
@@ -407,7 +457,3 @@ rm -rf ~/.agent-ssh-cli
 ## 许可证
 
 [MIT](LICENSE)
-
-## 友情链接
-
-- [LINUX DO - 新的理想型社区](https://linux.do/)
