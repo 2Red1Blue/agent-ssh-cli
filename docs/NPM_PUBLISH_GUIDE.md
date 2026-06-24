@@ -284,6 +284,100 @@ GitHub Actions 会自动：
 3. 发布主包
 4. 创建 GitHub Release
 
+### 触发方式说明
+
+`publish.yml` 当前支持两种触发方式：
+
+- 自动触发：`push.tags = v*`
+- 手动触发：`workflow_dispatch`
+
+对应 workflow 文件：
+
+- `.github/workflows/publish.yml`
+
+也就是说，正常情况下只要推送形如 `v0.1.2` 的 tag，就应该自动开始发版：
+
+```bash
+git tag v0.1.2
+git push origin v0.1.2
+```
+
+如果需要显式触发一次手动发布，可执行：
+
+```bash
+gh workflow run publish.yml \
+  --repo 2Red1Blue/agent-ssh-cli \
+  --ref v0.1.2
+```
+
+这里的 `--ref` 推荐直接指定 tag，而不是 `main`，这样可以确保发布内容和目标版本完全一致。
+
+### 如何确认是否已经触发
+
+先看最近的 workflow run：
+
+```bash
+gh run list \
+  --repo 2Red1Blue/agent-ssh-cli \
+  --limit 10 \
+  --json databaseId,workflowName,displayTitle,event,status,conclusion,headBranch,headSha,createdAt,url
+```
+
+重点看：
+
+- `workflowName` 是否为 `publish`
+- `event` 是 `push` 还是 `workflow_dispatch`
+- `headBranch` 是否为目标 tag，例如 `v0.1.2`
+- `headSha` 是否等于本次 release commit
+
+如果想持续观察某一次 run：
+
+```bash
+gh run watch <run-id> --repo 2Red1Blue/agent-ssh-cli --exit-status
+```
+
+如果想看更细的 job 结构：
+
+```bash
+gh run view <run-id> --repo 2Red1Blue/agent-ssh-cli --json status,conclusion,jobs,url
+```
+
+### 如果 tag 已推送但没有自动触发
+
+先检查 tag 是否真的在远端：
+
+```bash
+git ls-remote --tags origin v0.1.2
+```
+
+再检查 workflow 最近是否产生了 `push` 事件的 run。若没有，而你又确认：
+
+- 代码已经推到远端
+- tag 也已经推到远端
+- `publish.yml` 仍包含 `push.tags: 'v*'`
+
+则可先手动补触发：
+
+```bash
+gh workflow run publish.yml \
+  --repo 2Red1Blue/agent-ssh-cli \
+  --ref v0.1.2
+```
+
+这次 `v0.1.2` 的实际情况就是：
+
+- `main` 和 tag 已经成功推到 GitHub
+- 自动 `push tag` 没有生成新的 `publish` run
+- 后续通过 `workflow_dispatch` 对 `v0.1.2` 手动补触发，发布继续执行
+
+所以维护上建议统一按下面顺序确认：
+
+1. 先推 `main`
+2. 再推 tag
+3. 看 `gh run list` 是否出现新的 `publish` run
+4. 如果没有，再执行 `gh workflow run publish.yml --ref <tag>`
+5. 用 `gh run watch` 盯到平台包、主包、GitHub Release 全部完成
+
 ### 首发与后续发版的区别
 
 - 首发前如果包还不存在，不能先配 Trusted Publishing，必须先手工发布一次

@@ -11,24 +11,49 @@ const require = createRequire(import.meta.url);
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(currentDir, "..");
 const homeDir = os.homedir();
+const ccSwitchSkillsDir = path.join(homeDir, ".cc-switch", "skills");
 const KNOWN_CLIENTS = {
+  "cc-switch": {
+    label: "CC Switch",
+    skillsDir: ccSwitchSkillsDir,
+    isRuntimeClient: false
+  },
   codex: {
     label: "Codex",
-    skillsDir: path.join(homeDir, ".codex", "skills")
+    skillsDir: path.join(homeDir, ".codex", "skills"),
+    isRuntimeClient: true
   },
   claude: {
     label: "Claude Code",
-    skillsDir: path.join(homeDir, ".claude", "skills")
+    skillsDir: path.join(homeDir, ".claude", "skills"),
+    isRuntimeClient: true
   },
   opencode: {
     label: "OpenCode",
-    skillsDir: path.join(homeDir, ".config", "opencode", "skills")
+    skillsDir: path.join(homeDir, ".config", "opencode", "skills"),
+    isRuntimeClient: true
   },
   hermes: {
     label: "Hermes",
-    skillsDir: path.join(homeDir, ".hermes", "skills")
+    skillsDir: path.join(homeDir, ".hermes", "skills"),
+    isRuntimeClient: true
   }
 };
+
+function hasCcSwitchInstalled() {
+  return fs.existsSync(ccSwitchSkillsDir);
+}
+
+function getDefaultClientSelection() {
+  return hasCcSwitchInstalled() ? ["cc-switch", "codex"] : ["codex"];
+}
+
+function getDefaultPrimaryClient(selectedClients) {
+  if (selectedClients.includes("cc-switch")) {
+    return "cc-switch";
+  }
+  return selectedClients[0];
+}
 
 function expandHome(value) {
   if (!value) {
@@ -51,6 +76,9 @@ function normalizeClientName(value) {
 
   if (normalized === "claude" || normalized === "claudecode") {
     return "claude";
+  }
+  if (normalized === "ccswitch") {
+    return "cc-switch";
   }
   if (normalized === "codex") {
     return "codex";
@@ -219,6 +247,10 @@ async function promptInstallPlan(defaultClients, clientRoots) {
 
   try {
     console.log("选择要安装的客户端 skills 目录。");
+    if (hasCcSwitchInstalled()) {
+      console.log(`检测到 CC Switch，共享 skills 根目录可作为主链默认安装根：${ccSwitchSkillsDir}`);
+      console.log("如果你同时在 Codex / Claude Code 中使用 skill，推荐把 cc-switch 作为主链，再让其它客户端复用它。");
+    }
     console.log("可选客户端:");
     for (const clientName of Object.keys(KNOWN_CLIENTS)) {
       console.log(formatClientOption(clientName, clientRoots));
@@ -240,7 +272,7 @@ async function promptInstallPlan(defaultClients, clientRoots) {
       clientRoots.set("custom", expandHome(customPath));
     }
 
-    const defaultPrimary = selectedClients[0];
+    const defaultPrimary = getDefaultPrimaryClient(selectedClients);
     const primaryAnswer = (await rl.question(`主链客户端（默认 ${defaultPrimary}）: `)).trim();
     const primaryClient = primaryAnswer ? normalizeClientName(primaryAnswer) : defaultPrimary;
     if (!primaryClient || !selectedClients.includes(primaryClient)) {
@@ -274,6 +306,7 @@ function printInstallAiHelp() {
   - ~/.agent-ssh-cli/config.json（仅不存在时初始化示例配置）
 
 客户端默认 skills 根目录：
+  - cc-switch -> ~/.cc-switch/skills（如存在，推荐作为共享主链目录）
   - codex   -> ~/.codex/skills
   - claude  -> ~/.claude/skills
   - opencode -> ~/.config/opencode/skills
@@ -295,11 +328,16 @@ function printInstallAiHelp() {
 }
 
 function printNextSteps({ selectedTargets, primaryTarget, envMapTarget, configTarget, linkSecondary }) {
+  const runtimeTargets = selectedTargets.filter((target) => KNOWN_CLIENTS[target.client]?.isRuntimeClient !== false);
   console.log("");
   console.log("下一步标准流程：");
-  console.log("1. 重启以下客户端，让新 skill 被重新扫描：");
-  for (const target of selectedTargets) {
-    console.log(`   - ${KNOWN_CLIENTS[target.client]?.label || target.client}: ${target.skillsDir}`);
+  if (runtimeTargets.length > 0) {
+    console.log("1. 重启以下客户端，让新 skill 被重新扫描：");
+    for (const target of runtimeTargets) {
+      console.log(`   - ${KNOWN_CLIENTS[target.client]?.label || target.client}: ${target.skillsDir}`);
+    }
+  } else {
+    console.log("1. 当前只更新了共享主链目录，还没有绑定具体 AI 客户端。");
   }
   console.log("2. 进入任一已重启客户端后，先初始化共享 CLI 配置：");
   console.log(`   - 共享配置路径: ${configTarget}`);
@@ -318,7 +356,7 @@ function printNextSteps({ selectedTargets, primaryTarget, envMapTarget, configTa
   console.log(`请帮我初始化 agent-ssh-cli 的 JumpServer 配置。请按 README 里的 add-jump-server 流程每次只问我一个问题，收集完后执行 agentsshcli add-jump-server 写入 ${configTarget}，并用 agentsshcli list 和 jump-exec hostname 做最小验证。`);
   console.log("");
   console.log("B. 初始化 log-analyze 环境映射");
-  console.log(`请帮我初始化 log-analyze 的环境映射。请每次只问我一个问题，收集 JumpServer 名称、环境日志根目录、项目简称、默认 target、机器简称映射，写入 ${envMapTarget}，并用 agentsshcli jump-exec 做最小验证，直到客户端里可以正常使用 log-analyze。`);
+  console.log(`请帮我初始化 log-analyze 的环境映射。请每次只问我一个问题，收集 JumpServer 名称、各环境日志保存路径模式（例如 /www/<project>/logs 或 /data/<project>/logs）、项目简称、默认 target、机器简称映射，写入 ${envMapTarget}，并用 agentsshcli jump-exec 做最小验证，直到客户端里可以正常使用 log-analyze。`);
 }
 
 function copyFileEnsured(source, target) {
@@ -427,12 +465,12 @@ async function runInstallAi(args) {
   } else if (explicitClients.length > 0) {
     selectedClients = unique(explicitClients);
   } else if (interactive || (process.stdin.isTTY && process.stdout.isTTY)) {
-    const plan = await promptInstallPlan(["codex"], clientRoots);
+    const plan = await promptInstallPlan(getDefaultClientSelection(), clientRoots);
     selectedClients = plan.selectedClients;
     primaryClient = plan.primaryClient;
     linkSecondary = plan.linkSecondary;
   } else {
-    selectedClients = ["codex"];
+    selectedClients = getDefaultClientSelection();
   }
 
   if (selectedClients.length === 0) {
@@ -464,7 +502,9 @@ async function runInstallAi(args) {
     }
   }
 
-  const resolvedPrimaryClient = skillsDir ? "custom" : (primaryClient || selectedTargets[0].client);
+  const resolvedPrimaryClient = skillsDir
+    ? "custom"
+    : (primaryClient || getDefaultPrimaryClient(selectedTargets.map((target) => target.client)));
   const primaryTarget = selectedTargets.find((target) => target.client === resolvedPrimaryClient);
   if (!primaryTarget) {
     throw new Error(`未找到主链客户端: ${resolvedPrimaryClient}`);
@@ -496,7 +536,7 @@ async function runInstallAi(args) {
   }
 
   console.log("AI 安装完成：");
-  console.log(`- 主链客户端: ${primaryTarget.label || primaryTarget.client}`);
+  console.log(`- 主链安装根: ${primaryTarget.label || primaryTarget.client}`);
   console.log(`- 主链 skills 根目录: ${primaryTarget.skillsDir}`);
   console.log(`- 已更新 skill: ${primaryInstalled.agentSkillTarget}`);
   console.log(`- 已更新 skill: ${path.join(primaryInstalled.logSkillDir, "SKILL.md")}`);

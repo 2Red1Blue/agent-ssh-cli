@@ -12,7 +12,7 @@
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node.js >=18"></a>
   <a href="https://www.npmjs.com/"><img src="https://img.shields.io/badge/npm-%3E%3D8-CB3837?logo=npm&logoColor=white" alt="npm >=8"></a>
   <a href="https://github.com/2Red1Blue/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.2-blue" alt="release v0.1.2"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.3-blue" alt="release v0.1.3"></a>
   <a href="https://github.com/2Red1Blue/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
@@ -56,8 +56,9 @@ AI 一键安装：
 这句话现在仍然可用。AI 读完 `AI_INSTALL.md` 后，会继续完成：
 
 - 多 npm 前缀检查与逐个全局安装
-- 交互式选择客户端：`codex` / `claude` / `opencode` / `hermes` / `custom`
-- 选择主链客户端
+- 交互式选择客户端：`cc-switch` / `codex` / `claude` / `opencode` / `hermes` / `custom`
+- 如果检测到 `~/.cc-switch/skills`，默认把 `cc-switch` 作为共享主链安装根
+- 选择主链客户端或主链安装根
 - 选择其余客户端是软链复用还是分别复制
 - 安装 `agent-ssh-cli` 与 `log-analyze`
 - 初始化 `~/.agent-ssh-cli/config.json` 和主链 `env-map.md` 模板
@@ -137,7 +138,7 @@ agentsshcli install-ai --interactive
 
 只有在以下场景才建议手工安装：
 
-- 目标客户端不是内置的 `codex / claude / opencode / hermes`
+- 目标客户端不是内置的 `cc-switch / codex / claude / opencode / hermes`
 - 用户明确要求自己指定 skills 根目录
 - 需要把 skill 装到项目级目录而不是全局目录
 
@@ -260,7 +261,9 @@ agentsshcli jump-exec <gatewayConnection> --target <hostOrIp> "<command>" [--tim
 
 - `<gatewayConnection>`：在 `config.json` 中配置了 `jumpServer.enabled=true` 的连接名
 - `--target`：目标机器 hostname 或 IP（JumpServer 菜单会用它做搜索）
-- `--timeout`：可选，默认 60000ms。命令执行阶段沿用此预算，遇到高负载机器可调大
+- `--timeout`：可选，默认 60000ms。命令执行阶段沿用此预算，遇到高负载机器可调大；如果要扫整天归档日志，通常建议直接提高到 `120000~300000`
+
+> 当前 `jump-exec` 只支持正整数毫秒超时，不支持“无超时”；整天大日志检索更推荐先缩小时段、缩小文件，再配合更长 `--timeout`。
 
 > upload / download 不支持 JumpServer 模式，请改用直连。
 

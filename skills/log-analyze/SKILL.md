@@ -43,7 +43,7 @@ user-invocable: true
 如果 AI 第一次使用本 skill，或发现 `env-map.md` 不存在 / 内容不完整，必须：
 
 1. 每次只问用户一个问题
-2. 按顺序收集 JumpServer 连接、环境定义、日志根目录、项目简称、目标机映射
+2. 按顺序收集 JumpServer 连接、环境定义、日志保存路径模式、项目简称、目标机映射
 3. 把收集结果写入当前目录的 `env-map.md`
 4. 写入后立刻用 `agentsshcli jump-exec` 做最小验证
 
@@ -52,9 +52,9 @@ user-invocable: true
 1. 线上 JumpServer 连接名是什么
 2. 是否有独立测试 JumpServer；如果有，连接名是什么
 3. 预发布是否与线上共用同一个 JumpServer
-4. 线上日志根目录是什么
-5. 预发布日志根目录是什么
-6. 测试日志根目录是什么
+4. 线上日志保存路径模式是什么（例如 `/www/<project>/logs` 或 `/data/<project>/logs`）
+5. 预发布日志保存路径模式是什么
+6. 测试日志保存路径模式是什么
 7. 常用项目有哪些简称/别名
 8. 每个项目在各环境下的默认目标机（hostname 或 IP）是什么
 9. 是否有常用机器简称（如 `api-02`、`dz1-72`）
@@ -70,7 +70,7 @@ user-invocable: true
 
 - JumpServer 连接名映射
 - 环境定义（prod / yfb / test）
-- 日志根目录映射
+- 日志保存路径模式映射
 - 项目别名映射
 - 默认 target 映射
 - 机器简称到 hostname/IP 的映射
@@ -84,7 +84,7 @@ user-invocable: true
 - 环境推断
 - 项目推断
 - target 推断
-- 日志根目录推断
+- 日志保存路径模式推断
 
 ### Step 0.5：先从告警文本提取检索锚点
 
@@ -222,6 +222,23 @@ cat <超大日志文件> | grep ...
 - 会扫到大量历史小时文件
 - 容易命中超大 `info.log` / `statistic.log`
 - 输出体积失控，严重拖慢 AI 分析
+
+### Step 2.2.1：大范围历史日志的 timeout 策略
+
+如果 scoped 查询已经失败，确实需要扫更大范围的历史日志：
+
+- 先把 `--timeout` 提高到 `120000~300000`
+- 当前 `jump-exec` 不支持“无超时”；必须传正整数毫秒值
+- 文件顺序要按“最可能命中”排前面，不要把整天的超大 `info.log_*` 放在最前面
+- 如果关键词更可能出现在 `statistic.log` 或特定小时文件，应先查这些文件，再决定是否扩大到全天
+
+典型反例：
+
+```bash
+grep -R -n -m 80 "<keyword>" info.log_YYYY-MM-DD* error.log_YYYY-MM-DD* statistic.log_YYYY-MM-DD*
+```
+
+这类命令容易先把数 GB 的 `info.log_*` 从 00 点扫到 23 点，明明真正命中在后面的 `statistic.log_10.log`，最终却表现成 “30 秒还没结果”。
 
 ### Step 2.3：最近告警优先查当前文件尾部
 

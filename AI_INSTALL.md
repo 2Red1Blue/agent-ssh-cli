@@ -43,12 +43,13 @@ npm 安装会按当前系统自动拉取对应平台的 optional 预编译包；
 `agentsshcli install-ai` 现在不是简单复制到一个目录，而是面向首次安装用户提供以下能力：
 
 - 交互式选择客户端：
+  - `cc-switch`（共享 skills 主链目录，默认 `~/.cc-switch/skills`）
   - `codex`
   - `claude`
   - `opencode`
   - `hermes`
   - `custom`（手动输入 skills 根目录完整路径）
-- 指定一个“主链客户端”
+- 指定一个“主链客户端”或“主链安装根”
 - 其他客户端可选择：
   - 软链复用主链 skill / `env-map`
   - 或各自复制一份
@@ -56,16 +57,18 @@ npm 安装会按当前系统自动拉取对应平台的 optional 预编译包；
 共享与隔离原则：
 
 - `~/.agent-ssh-cli/config.json` 是**共享 CLI 配置**
+- 如果检测到 `~/.cc-switch/skills`，推荐优先把它当作共享主链目录
 - `SKILL.md` 和 `env-map.md` 属于各客户端自己的 skills 目录
 - 如果选择“软链复用”，多个客户端会共享主链那份 `log-analyze/env-map.md`
 - 如果选择“分别复制”，每个客户端都有自己的 `env-map.md`
 
 推荐首次安装策略：
 
-1. 选择你最常用的客户端作为主链
-2. 其他客户端优先软链复用
-3. 安装后重启所有目标客户端
-4. 在任一客户端中继续交互式补 `config.json` 和 `env-map.md`
+1. 如果本机已有 `cc-switch`，优先选择 `cc-switch` 作为主链
+2. 当前正在使用的 AI 客户端作为次级复用目录
+3. 其他客户端优先软链复用
+4. 安装后重启所有目标客户端
+5. 在任一客户端中继续交互式补 `config.json` 和 `env-map.md`
 
 
 ## 1. 安装 CLI
@@ -90,7 +93,8 @@ agentsshcli install-ai
 - 安装 CLI
 - 自动进入客户端安装流程
 - 交互式询问要安装到哪些客户端
-- 交互式询问哪个客户端作为主链
+- 如果检测到 `cc-switch`，默认将其作为主链安装根
+- 交互式询问哪个客户端或安装根作为主链
 - 交互式询问其余客户端是软链复用还是分别复制
 - 安装 `agent-ssh-cli` skill
 - 安装 `log-analyze` skill
@@ -111,6 +115,24 @@ for npm_bin in $(which -a npm 2>/dev/null | awk '!seen[$0]++'); do
   "$npm_bin" install -g @2red1blue/agentsshcli || exit 1
 done
 agentsshcli install-ai --clients codex,claude,hermes --primary-client codex
+```
+
+如果本机已经装了 `cc-switch`，推荐显式把它作为主链：
+
+```bash
+agentsshcli install-ai --clients cc-switch,codex,claude --primary-client cc-switch
+```
+
+如果你当前就在 Codex 里让 AI 帮你装，推荐默认方案是：
+
+```bash
+agentsshcli install-ai --clients cc-switch,codex --primary-client cc-switch
+```
+
+如果你当前就在 Claude Code 里让 AI 帮你装，推荐默认方案是：
+
+```bash
+agentsshcli install-ai --clients cc-switch,claude --primary-client cc-switch
 ```
 
 如果你希望某个客户端使用自定义 skills 根目录，也可以直接传完整路径：
@@ -151,8 +173,9 @@ agentsshcli install-ai --interactive
 3. 只保留唯一前缀
 4. 对每个唯一前缀对应的 `npm` 都执行一次全局安装
 5. 再执行 `agentsshcli install-ai`
-6. 若用户未明确指定客户端，优先使用交互模式
-7. 若用户输入的是非内置客户端，要求其提供 skills 根目录完整路径
+6. 若检测到 `~/.cc-switch/skills`，优先把 `cc-switch` 作为主链候选
+7. 若用户未明确指定客户端，优先使用交互模式
+8. 若用户输入的是非内置客户端，要求其提供 skills 根目录完整路径
 
 如果 `agentsshcli --help` 失败，先检查：
 
@@ -191,11 +214,18 @@ mkdir -p ~/.agent-ssh-cli
 `agentsshcli install-ai` 支持以下内置客户端默认目录：
 
 ```text
+cc-switch -> ~/.cc-switch/skills/
 codex    -> ~/.codex/skills/
 claude   -> ~/.claude/skills/
 opencode -> ~/.config/opencode/skills/
 hermes   -> ~/.hermes/skills/
 ```
+
+如果安装器检测到 `~/.cc-switch/skills` 已存在：
+
+- 交互模式默认会把 `cc-switch` 放进默认客户端列表
+- 主链默认会优先选择 `cc-switch`
+- 你仍然可以改成 `codex`、`claude` 或其它目标
 
 如果用户使用的是其它客户端，或对方有自己的 skills 根目录约定，应使用：
 
@@ -205,9 +235,10 @@ agentsshcli install-ai --clients custom --client-root custom=/absolute/path/to/s
 
 也就是说，判断规则是：
 
-1. 已知客户端：直接选内置名字
-2. 未知客户端：让用户输入 skills 根目录完整路径
-3. 不确定客户端目录：先问清楚，不要猜
+1. 如果存在 `cc-switch`：优先把它当共享主链目录
+2. 已知客户端：直接选内置名字
+3. 未知客户端：让用户输入 skills 根目录完整路径
+4. 不确定客户端目录：先问清楚，不要猜
 
 如果你仍想手工安装，Codex 默认目录示例：
 
@@ -285,7 +316,7 @@ agentsshcli jump-exec --timeout 120000 <jumpserver-connection> --target <known-t
 2. 测试 JumpServer 连接名（如果有）
 3. 线上目标主机命名规则（hostname 还是 IP）
 4. 预发布是否与线上共用 JumpServer
-5. 各环境日志根目录（例如 `/www` 或 `/data`）
+5. 各环境日志保存路径模式（例如 `/www/<project>/logs` 或 `/data/<project>/logs`）
 6. 常用项目别名、机器别名、默认 target
 
 如果需要完整示例流程，请阅读后续补充文档：
@@ -303,7 +334,7 @@ agentsshcli jump-exec --timeout 120000 <jumpserver-connection> --target <known-t
 2. 初始化 log-analyze 映射
 
 ```text
-请帮我初始化 log-analyze 的环境映射。请每次只问我一个问题，收集 JumpServer 名称、环境日志根目录、项目简称、默认 target、机器简称映射，写入当前主链客户端的 log-analyze/env-map.md，并用 agentsshcli jump-exec 做最小验证，直到客户端里可以正常使用 log-analyze。
+请帮我初始化 log-analyze 的环境映射。请每次只问我一个问题，收集 JumpServer 名称、各环境日志保存路径模式（例如 /www/<project>/logs 或 /data/<project>/logs）、项目简称、默认 target、机器简称映射，写入当前主链客户端的 log-analyze/env-map.md，并用 agentsshcli jump-exec 做最小验证，直到客户端里可以正常使用 log-analyze。
 ```
 
 如果后续你更新了 `log-analyze` 的工作流模板，也要同步覆盖本地安装目录中的：

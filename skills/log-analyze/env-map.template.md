@@ -17,15 +17,15 @@
 - `prod`
   - 通过哪个 JumpServer 进入
   - target 通常用 hostname 还是 IP
-  - 日志根目录
+  - 日志保存路径模式（例如 `/www/<project>/logs` 或 `/data/<project>/logs`）
 - `yfb`
   - 是否与 prod 共用 JumpServer
   - target 通常用 hostname 还是 IP
-  - 日志根目录
+  - 日志保存路径模式（例如 `/www/<project>/logs` 或 `/data/<project>/logs`）
 - `test`
   - 通过哪个 JumpServer 进入
   - target 通常用 hostname 还是 IP
-  - 日志根目录
+  - 日志保存路径模式（例如 `/www/<project>/logs` 或 `/data/<project>/logs`）
 
 ## Project Aliases
 

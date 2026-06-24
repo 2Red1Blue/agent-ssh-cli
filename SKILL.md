@@ -136,8 +136,9 @@ agentsshcli --help
 这条提示词在当前版本仍然有效。AI 读完后，不应只停在“复制 `SKILL.md`”这一步，而应继续完成：
 
 - 多 npm 前缀安装
-- 交互式选择客户端（`codex` / `claude` / `opencode` / `hermes` / `custom`）
-- 选择主链客户端
+- 交互式选择客户端（`cc-switch` / `codex` / `claude` / `opencode` / `hermes` / `custom`）
+- 如果检测到 `~/.cc-switch/skills`，优先把 `cc-switch` 作为主链安装根候选
+- 选择主链客户端或主链安装根
 - 选择其余客户端是软链复用还是分别复制
 - 初始化 `~/.agent-ssh-cli/config.json`
 - 初始化主链 `log-analyze/env-map.md` 模板
