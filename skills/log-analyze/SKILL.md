@@ -257,6 +257,7 @@ cat <超大日志文件> | grep ...
 - 当前 `jump-exec` 不支持“无超时”；必须传正整数毫秒值
 - 文件顺序要按“最可能命中”排前面，不要把整天的超大 `info.log_*` 放在最前面
 - 如果关键词更可能出现在 `statistic.log` 或特定小时文件，应先查这些文件，再决定是否扩大到全天
+- **大日志 grep 默认带 `--no-cache`**：带 daemon 缓存的 `jump-exec` 跑大输出 grep 会偶发 `SSH 缓存进程响应未读完整: failed to fill whole buffer`，加 `--no-cache` 后稳定。大日志检索场景一律用直连，缓存复用只用于轻量探测和小命令。
 
 典型反例：
 
@@ -265,6 +266,13 @@ grep -R -n -m 80 "<keyword>" info.log_YYYY-MM-DD* error.log_YYYY-MM-DD* statisti
 ```
 
 这类命令容易先把数 GB 的 `info.log_*` 从 00 点扫到 23 点，明明真正命中在后面的 `statistic.log_10.log`，最终却表现成 “30 秒还没结果”。
+
+大日志 grep 推荐写法（直连 + 长超时）：
+
+```bash
+agentsshcli jump-exec --no-cache --timeout 300000 <connection> --target <target> \
+  "grep -n -m 80 '<keyword>' /www/<project>/logs/statistic.log_YYYY-MM-DD_HH.log /www/<project>/logs/error.log_YYYY-MM-DD.log 2>/dev/null"
+```
 
 ### Step 2.3：最近告警优先查当前文件尾部
 
