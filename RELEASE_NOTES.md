@@ -1,5 +1,22 @@
 # Release Notes
 
+## v0.1.6
+
+本次发布修复 JumpServer 搜索与跳板机超时续期的若干问题：
+
+- `jump-search` 修复：搜索/列表完成后 JumpServer 停在资产子 prompt `[Host]>`（而非菜单 `Opt>`），旧逻辑只等 `Opt>` 导致超时后丢弃结果。现在结果等待正则同时匹配 `Opt>` 与 `[A-Za-z]+>` 子 prompt，搜索结果能被正确收尾返回。
+- `jump-search` 新增 `--mode auto|list|search`（默认 `auto`）：先走 `/query` 搜索（已验证有效），为空再回退 `p` 列权限主机本地过滤；不再强制先 `p`。`search` 为旧行为，`list` 只列主机。
+- `jump-search` 输出清洗增强：跳过菜单项、表格分隔线、表头（`ID | 主机名`）、翻页提示（`页码：`/`提示：`/`上一页...下一页`/`搜索：`），只保留真实主机行。
+
+验证：
+
+- `node --check bin/agentsshcli.js`
+- `npm run check:release`
+- `cargo test --manifest-path native/Cargo.toml`
+- `agentsshcli jump-search --timeout 60000 prod.jumpserver adserving-api`（返回 4 台候选）
+- `agentsshcli jump-search --timeout 60000 prod.jumpserver ad-service`（返回 2 台候选）
+- `agentsshcli jump-search --timeout 60000 prod.jumpserver ad-conf`（返回 2 台候选）
+
 ## v0.1.4
 
 本次发布聚焦 AI 安装与日志排障体验：

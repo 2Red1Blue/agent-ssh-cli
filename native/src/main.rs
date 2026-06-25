@@ -75,8 +75,8 @@ const HELP_AGENTSSHCLI: &str = r#"
 
 const HELP_JUMP_SEARCH: &str = r#"
 用法:
-  agentsshcli jump-search [--config <path>] [--timeout <ms>] [--total-timeout <ms>] <gatewayConnection> <query>
-  agentsshcli jump-search [--config <path>] [--timeout <ms>] [--total-timeout <ms>] --connection <name> --query <text>
+  agentsshcli jump-search [--config <path>] [--timeout <ms>] [--total-timeout <ms>] [--mode auto|list|search] <gatewayConnection> <query>
+  agentsshcli jump-search [--config <path>] [--timeout <ms>] [--total-timeout <ms>] [--mode auto|list|search] --connection <name> --query <text>
   agentsshcli help jump-search
   agentsshcli --version
 
@@ -85,6 +85,10 @@ const HELP_JUMP_SEARCH: &str = r#"
   适合用户只给了业务简称、机器简称、实例尾号或 IP 片段时，先查出真实 hostname / IP。
   网关连接必须在 config.json 中配置 jumpServer.enabled=true。
   --timeout 控制“无输出/无响应”超时，默认 15000ms；--total-timeout 可选，用于设置整次搜索的硬上限。
+  --mode 控制搜索策略，默认 auto：
+    - auto：先发 p 列出有权限的主机并本地按 query 过滤；过滤为空再回退 /query 搜索
+    - list：只发 p 列权限主机（本地过滤），不尝试 /query
+    - search：只发 /query 搜索（旧行为，部分 JumpServer 版本不识别裸 / 搜索）
 "#;
 
 const HELP_JUMP_MENU: &str = r#"
@@ -345,11 +349,35 @@ struct JumpExecArgs {
     total_timeout_ms: Option<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JumpSearchMode {
+    /// 先发 p 列出有权限的主机，本地按 query 过滤；为空再回退 /query 搜索
+    Auto,
+    /// 只发 p 列权限主机（本地过滤）
+    List,
+    /// 只发 /query 搜索（旧行为）
+    Search,
+}
+
+impl JumpSearchMode {
+    fn parse(value: &str) -> AppResult<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(JumpSearchMode::Auto),
+            "list" => Ok(JumpSearchMode::List),
+            "search" => Ok(JumpSearchMode::Search),
+            other => Err(AppError::new(format!(
+                "未知 --mode: {}（应为 auto/list/search）",
+                other
+            ))),
+        }
+    }
+}
+
 struct JumpSearchArgs {
     global: GlobalArgs,
     connection_name: String,
     query: String,
+    mode: JumpSearchMode,
     idle_timeout_ms: u64,
     total_timeout_ms: Option<u64>,
 }
@@ -2480,6 +2508,7 @@ fn parse_jump_search_args(argv: Vec<String>) -> AppResult<JumpSearchArgs> {
             global,
             connection_name: String::new(),
             query: String::new(),
+            mode: JumpSearchMode::Auto,
             idle_timeout_ms: 15000,
             total_timeout_ms: None,
         });
@@ -2487,6 +2516,7 @@ fn parse_jump_search_args(argv: Vec<String>) -> AppResult<JumpSearchArgs> {
     let mut args = global.args.clone();
     let connection_option = take_option(&mut args, &["--connection", "-c"])?;
     let query_option = take_option(&mut args, &["--query"])?;
+    let mode_option = take_option(&mut args, &["--mode"])?;
     let timeout_value = take_option(&mut args, &["--timeout", "-t"])?;
     let total_timeout_value = take_option(&mut args, &["--total-timeout"])?;
     let connection_positional = take_positional(&mut args, "gatewayConnection")?;
@@ -2505,6 +2535,10 @@ fn parse_jump_search_args(argv: Vec<String>) -> AppResult<JumpSearchArgs> {
     let query = query_option
         .or(query_positional)
         .ok_or_else(|| AppError::new("缺少必填参数 query，使用 --help 查看说明"))?;
+    let mode = match mode_option {
+        Some(value) => JumpSearchMode::parse(&value)?,
+        None => JumpSearchMode::Auto,
+    };
     let idle_timeout_ms = match timeout_value {
         Some(value) => normalize_positive_u64(&value, "timeout 必须是正整数毫秒值")?,
         None => 15000,
@@ -2520,6 +2554,7 @@ fn parse_jump_search_args(argv: Vec<String>) -> AppResult<JumpSearchArgs> {
         global,
         connection_name,
         query,
+        mode,
         idle_timeout_ms,
         total_timeout_ms,
     })
@@ -2641,6 +2676,7 @@ fn run_jump_search(argv: Vec<String>) -> AppResult<()> {
             connection,
             jump_config,
             &parsed.query,
+            parsed.mode,
             parsed.idle_timeout_ms,
             parsed.total_timeout_ms,
         ),
@@ -2924,6 +2960,7 @@ async fn search_jump_targets_async(
     connection: &Connection,
     jump: &JumpServerConfig,
     query: &str,
+    mode: JumpSearchMode,
     idle_timeout_ms: u64,
     total_timeout_ms: Option<u64>,
 ) -> AppResult<String> {
@@ -2934,6 +2971,7 @@ async fn search_jump_targets_async(
         connection,
         jump,
         query,
+        mode,
         idle_timeout_ms,
         total_deadline,
     )
@@ -3137,6 +3175,22 @@ fn extract_jump_search_output(
         if trimmed == search_text {
             continue;
         }
+        // 跳过菜单项噪声（如 "1) 输入 ..."）
+        if is_jump_menu_item(trimmed) {
+            continue;
+        }
+        // 跳过表格分隔线（全是 -、+、=、|、空格）
+        if is_table_separator(trimmed) {
+            continue;
+        }
+        // 跳过 JumpServer 表头行（含 ID | 主机名 这类列标题）
+        if is_jump_table_header(trimmed) {
+            continue;
+        }
+        // 跳过翻页/提示行
+        if is_jump_page_hint(trimmed) {
+            continue;
+        }
         lines.push(line.to_string());
     }
     let output = lines.join("\n").trim().to_string();
@@ -3144,6 +3198,32 @@ fn extract_jump_search_output(
         return Err(AppError::new("JumpServer 搜索未返回可识别的候选结果"));
     }
     Ok(output)
+}
+
+fn is_table_separator(line: &str) -> bool {
+    if line.is_empty() {
+        return false;
+    }
+    // 仅由 - + = | 空格 组成，且至少含一个 - 或 +
+    let has_sep = line.chars().any(|c| c == '-' || c == '+');
+    has_sep && line.chars().all(|c| matches!(c, '-' | '+' | '=' | '|' | ' ' | '\t'))
+}
+
+fn is_jump_table_header(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    // JumpServer 资产表格表头特征：同时含 ID 和 主机名/host，或含 "id |" 列标记
+    (lower.contains("id") && (lower.contains("主机名") || lower.contains("hostname") || lower.contains("host")))
+        || lower.starts_with("id |")
+        || lower.starts_with("id|")
+}
+
+fn is_jump_page_hint(line: &str) -> bool {
+    // 翻页提示：页码：1，每页行数：33... / 提示：输入资产ID... / 上一页：b 下一页：n / 搜索：
+    line.starts_with("页码：")
+        || line.starts_with("提示：")
+        || (line.contains("上一页") && line.contains("下一页"))
+        || line == "搜索："
+        || line.starts_with("搜索：")
 }
 
 fn extract_jump_menu_output(buffer: &str, prompt_re: &Regex) -> AppResult<String> {
@@ -3184,36 +3264,166 @@ async fn search_jump_targets_with_session(
     connection: &Connection,
     jump: &JumpServerConfig,
     query: &str,
+    mode: JumpSearchMode,
     idle_timeout_ms: u64,
     total_deadline: Option<tokio::time::Instant>,
 ) -> AppResult<String> {
     let (mut channel, mut buffer, prompt_re) =
         open_jump_menu_channel(session, connection, jump, idle_timeout_ms, total_deadline).await?;
-    let search_text = build_jump_search_text(query, &jump.search_prefix);
-    buffer.clear();
-    channel_send_slow(&mut channel, &search_text, jump.char_delay_ms).await?;
-    let first = expect_regex(
+    // 搜索/列表完成后 JumpServer 可能停在资产子 prompt（如 [Host]>），也可能回到 Opt> 菜单，
+    // 用组合正则等待结果结束，避免只认 Opt> 导致搜完截断不到结果。
+    let result_prompt_re = build_search_result_prompt_re(&prompt_re)?;
+
+    // Search / Auto：直接发 /query 搜索（主路径，已验证有效）
+    let tried_search = mode == JumpSearchMode::Search || mode == JumpSearchMode::Auto;
+    if tried_search {
+        let search_result = run_jump_search_query(
+            &mut channel,
+            &mut buffer,
+            jump,
+            query,
+            &result_prompt_re,
+            idle_timeout_ms,
+            total_deadline,
+        )
+        .await;
+        if mode == JumpSearchMode::Search {
+            return search_result;
+        }
+        if let Ok(out) = search_result {
+            if !out.trim().is_empty() {
+                return Ok(out);
+            }
+        }
+        // Auto 回退到 list (p)，channel 仍停留在菜单/搜索 prompt
+    }
+
+    // List / Auto 回退：发 p 列出有权限的主机，本地按 query 过滤
+    collect_host_list(
         &mut channel,
         &mut buffer,
-        &prompt_re,
+        &result_prompt_re,
+        query,
+        idle_timeout_ms,
+        total_deadline,
+    )
+    .await
+}
+
+/// 构造搜索/列表结果的等待 prompt：匹配菜单 prompt（Opt>）或资产子 prompt（[Host]> 等）。
+fn build_search_result_prompt_re(menu_prompt_re: &Regex) -> AppResult<Regex> {
+    let menu_src = menu_prompt_re.as_str();
+    // 去掉可能的 (?m) 前缀和行尾锚，统一在组合正则里加
+    let stripped = menu_src.trim_start_matches("(?m)").replace(r"\s*$", "");
+    let pattern = format!(r"(?m)(?:{}|\[[A-Za-z]+\]>)\s*$", stripped);
+    Regex::new(&pattern)
+        .map_err(|error| AppError::new(format!("构造搜索结果 prompt 正则失败: {}", error)))
+}
+
+/// 发送 /query 搜索并解析表格结果。
+async fn run_jump_search_query(
+    channel: &mut Channel<client::Msg>,
+    buffer: &mut String,
+    jump: &JumpServerConfig,
+    query: &str,
+    result_prompt_re: &Regex,
+    idle_timeout_ms: u64,
+    total_deadline: Option<tokio::time::Instant>,
+) -> AppResult<String> {
+    let search_text = build_jump_search_text(query, &jump.search_prefix);
+    buffer.clear();
+    channel_send_slow(channel, &search_text, jump.char_delay_ms).await?;
+    let first = expect_regex(
+        channel,
+        buffer,
+        result_prompt_re,
         idle_timeout_ms,
         total_deadline,
         "JumpServer 搜索结果",
     )
     .await;
     if first.is_err() {
-        channel_send_line(&mut channel, "").await?;
+        channel_send_line(channel, "").await?;
         expect_regex(
-            &mut channel,
-            &mut buffer,
-            &prompt_re,
+            channel,
+            buffer,
+            result_prompt_re,
             idle_timeout_ms,
             total_deadline,
             "JumpServer 搜索结果（二次回车）",
         )
         .await?;
     }
-    extract_jump_search_output(&buffer, &search_text, &prompt_re)
+    extract_jump_search_output(buffer, &search_text, result_prompt_re)
+}
+
+/// 发送 p 列出当前账号有权限的主机，收集到结果 prompt 后按 query 本地过滤。
+async fn collect_host_list(
+    channel: &mut Channel<client::Msg>,
+    buffer: &mut String,
+    result_prompt_re: &Regex,
+    query: &str,
+    idle_timeout_ms: u64,
+    total_deadline: Option<tokio::time::Instant>,
+) -> AppResult<String> {
+    buffer.clear();
+    channel_send_line(channel, "p").await?;
+    let first = expect_regex(
+        channel,
+        buffer,
+        result_prompt_re,
+        idle_timeout_ms,
+        total_deadline,
+        "JumpServer 主机列表 (p)",
+    )
+    .await;
+    if first.is_err() {
+        // 部分版本列表较长需要回车翻页，或首次回显未立即返回 prompt
+        channel_send_line(channel, "").await?;
+        expect_regex(
+            channel,
+            buffer,
+            result_prompt_re,
+            idle_timeout_ms,
+            total_deadline,
+            "JumpServer 主机列表 (p 二次回车)",
+        )
+        .await?;
+    }
+    extract_jump_search_output(buffer, "p", result_prompt_re).and_then(|out| {
+        // p 列表已含全部主机，再按 query 本地过滤一次，缩小到候选
+        if query.trim().is_empty() {
+            return Ok(out);
+        }
+        let query_lower = query.trim().to_ascii_lowercase();
+        let filtered: Vec<&str> = out
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().contains(&query_lower))
+            .collect();
+        if filtered.is_empty() {
+            return Err(AppError::new("JumpServer 主机列表未返回匹配 query 的候选结果"));
+        }
+        Ok(filtered.join("\n"))
+    })
+}
+
+/// 识别 JumpServer 菜单项行，如 "1) 输入 ..." / "10) 输入 q 进行退出"。
+/// 主机列表行通常不会以 "数字)" 开头（表格一般是 "数字  hostname  ip"），可借此剔除菜单噪声。
+fn is_jump_menu_item(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let mut chars = trimmed.chars();
+    let mut saw_digit = false;
+    while let Some(c) = chars.next() {
+        if c.is_ascii_digit() {
+            saw_digit = true;
+        } else if c == ')' && saw_digit {
+            // 紧跟 )，判定为菜单项
+            return true;
+        } else {
+            return false;
+        }
+    }
+    false
 }
 
 /// 在已经进入目标 shell 的 channel 上发送 marker-wrapped 命令并解析结果。
@@ -4045,17 +4255,32 @@ wBAgM=\n\
 
     #[test]
     fn extract_jump_search_output_filters_prompt_lines() {
-        let prompt = Regex::new(r"Opt>\s*$").unwrap();
+        // 真实 JumpServer 搜索输出：回显命令 + 表格主机行 + 资产子 prompt [Host]>
+        let prompt = Regex::new(r"(?m)(?:Opt>|\[[A-Za-z]+\]>)\s*$").unwrap();
         let out = extract_jump_search_output(
-            "Opt> /adserving\n1) hwtf-adserving-api-01 172.31.1.10\n2) hwtf-adserving-api-02 172.31.1.11\nOpt>\n",
-            "/adserving",
+            "/ad-service\n  1  | hwtf-adservice-01 | 172.31.120.250 | Linux | hw-ad-service\n  2  | hwtf-adservice-02 | 172.31.118.232 | Linux | hw-ad-service\n[Host]>\n",
+            "/ad-service",
             &prompt,
         )
         .unwrap();
-        assert_eq!(
-            out,
-            "Opt> /adserving\n1) hwtf-adserving-api-01 172.31.1.10\n2) hwtf-adserving-api-02 172.31.1.11"
-        );
+        assert!(out.contains("hwtf-adservice-01"));
+        assert!(out.contains("hwtf-adservice-02"));
+        // 回显的搜索命令和 prompt 都应被过滤
+        assert!(!out.contains("/ad-service"));
+        assert!(!out.contains("[Host]>"));
+    }
+
+    #[test]
+    fn extract_jump_search_output_filters_table_noise() {
+        // p 列表输出含表头、分隔线、翻页提示，应只保留主机行
+        let prompt = Regex::new(r"(?m)(?:Opt>|\[[A-Za-z]+\]>)\s*$").unwrap();
+        let input = "p\n  ID | 主机名              | IP             | 平台  | 备注\n-----+---------------------+----------------+-------+------\n  1  | hwtf-adserving-api-01 | 172.31.61.136  | Linux | hw-adserving-api\n页码：1，每页行数：33，总页数：1，总数量：1\n提示：输入资产ID直接登录\n[Host]>\n";
+        let out = extract_jump_search_output(input, "p", &prompt).unwrap();
+        assert!(out.contains("hwtf-adserving-api-01"));
+        assert!(!out.contains("主机名"));
+        assert!(!out.contains("页码："));
+        assert!(!out.contains("提示："));
+        assert!(!out.contains("-----"));
     }
 
     #[test]
