@@ -1,6 +1,6 @@
 {
   "name": "@2red1blue/agentsshcli-linux-arm64",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "agentsshcli native binary for linux-arm64",
   "license": "MIT",
   "os": [

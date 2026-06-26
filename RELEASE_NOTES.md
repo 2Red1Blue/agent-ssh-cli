@@ -1,5 +1,18 @@
 # Release Notes
 
+## v0.1.7
+
+本次发布补充了 `log-analyze` 的升级说明：
+
+- 新增文档提醒：升级 `agentsshcli` 后，建议顺手执行 `agentsshcli doctor-skills` 和 `agentsshcli sync-skills`，让本地安装的 `log-analyze` 一起同步到新模板。
+- 继续强化 `log-analyze` 的反常识排障习惯：遇到现象和常识不符时，优先检查全局拦截器、AOP、Filter、`HandlerInterceptor`、MyBatis 插件和注解增强链路。
+
+验证：
+
+- `node --check bin/agentsshcli.js`
+- `npm run check:release`
+- `cargo test --manifest-path native/Cargo.toml`
+
 ## v0.1.6
 
 本次发布修复 JumpServer 搜索与跳板机超时续期的若干问题：

@@ -12,7 +12,7 @@
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-339933?logo=node.js&logoColor=white" alt="Node.js >=18"></a>
   <a href="https://www.npmjs.com/"><img src="https://img.shields.io/badge/npm-%3E%3D8-CB3837?logo=npm&logoColor=white" alt="npm >=8"></a>
   <a href="https://github.com/2Red1Blue/agent-ssh-cli"><img src="https://img.shields.io/badge/sys-win%2Fmac%2Flinux-0078D6" alt="sys win/mac/linux"></a>
-  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.5-blue" alt="release v0.1.5"></a>
+  <a href="https://github.com/2Red1Blue/agent-ssh-cli/releases"><img src="https://img.shields.io/badge/release-v0.1.7-blue" alt="release v0.1.7"></a>
   <a href="https://github.com/2Red1Blue/agent-ssh-cli/pulls"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome"></a>
 </p>
 
@@ -103,6 +103,7 @@ agentsshcli sync-skills
 ```
 
 `sync-skills` 默认会尽量保留你本地补充的内容，并备份当前 `SKILL.md`；`env-map.json` / `env-map.md` 和私有配置不会被覆盖。
+如果你刚升级过 `agentsshcli`，建议顺手先跑一遍 `agentsshcli doctor-skills` 和 `agentsshcli sync-skills`，让本地安装的 `log-analyze` 一起同步到新模板。
 
 首次安装后，如果要让 AI 交互式补齐你自己的环境映射，请参考：
 

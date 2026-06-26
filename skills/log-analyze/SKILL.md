@@ -459,6 +459,36 @@ jstack <PID> | head -200
 - 仅查询测试环境数据
 - 严禁在线上数据库执行任何修改操作
 
+### Step 3.5：出现“反常识现象”时优先检查全局增强层
+
+如果日志、表结构、业务代码表面现象组合起来**不符合常识**，例如：
+
+- 看起来只执行了一次插入，却报主键重复
+- 没看到显式重试代码，却像是同一逻辑被执行了两次
+- 业务异常与底层 SQL / RPC / HTTP 行为对不上
+- 代码里没有直接改写参数，但实际执行 SQL、请求体或返回值像被二次加工过
+
+则不要只盯着当前业务方法，必须补查项目里的**全局拦截器 / 注解增强 / 切面链路**，优先包括：
+
+- MyBatis Interceptor、MyBatis-Plus 插件、SQL 打印拦截器
+- Spring `HandlerInterceptor`、Servlet `Filter`
+- Spring AOP / `@Aspect`
+- 统一异常处理、事务切面、动态数据源切面
+- 通过注解触发的全局增强，例如 `@Transactional`、`@DS`、自定义注解切面
+
+推荐代码检索关键词：
+
+```bash
+rg -n "Interceptor|HandlerInterceptor|Filter|OncePerRequestFilter|@Aspect|@Around|@Before|@After|MetaObjectHandler|InnerInterceptor|Plugin" <project-root>
+```
+
+分析原则：
+
+- 先确认异常发生点前后，是否有“全局层日志”
+- 如果某个拦截器 / 切面先报错，再出现业务异常，要高度怀疑它改变了执行次数、参数替换、事务边界或异常传播路径
+- 遇到“明明业务代码没重试，却出现二次执行”的问题，优先检查拦截器里是否在 `catch`、`finally` 或日志拼接阶段又触发了一次底层调用
+- 结论里要明确区分：是业务代码本身的问题，还是全局增强层放大/伪造了表象
+
 ### Step 4：根因分析与修复建议
 
 综合以下信息：

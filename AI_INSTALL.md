@@ -364,7 +364,7 @@ agentsshcli jump-exec --timeout 120000 <jumpserver-connection> --target <known-t
 - 通用规则升级：覆盖 `SKILL.md`
 - 私有环境变化：更新 `env-map.md`
 
-从 `0.1.5` 开始，更推荐用下面这组命令先检查再兼容更新：
+从 `0.1.5` 开始，更推荐用下面这组命令先检查再兼容更新；如果是升级到新版本后再回来用这套技能，也建议先跑一遍 `doctor-skills`，再执行 `sync-skills`，让本地安装的 `log-analyze` 也同步到最新模板：
 
 ```bash
 agentsshcli doctor-skills
